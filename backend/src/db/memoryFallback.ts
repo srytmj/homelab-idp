@@ -148,13 +148,21 @@ class MemoryDbStore {
     if (/INSERT INTO users/i.test(trimmed)) {
       const id = params.length >= 6 ? params[0] : crypto.randomUUID();
       const offset = params.length >= 6 ? 1 : 0;
+      let role = params[offset + 4];
+      if (!role) {
+        if (/'admin'/i.test(trimmed)) {
+          role = 'admin';
+        } else {
+          role = 'member';
+        }
+      }
       const user: UserRecord = {
         id,
         username: params[offset],
         email: params[offset + 1],
         password_hash: params[offset + 2],
         display_name: params[offset + 3] || params[offset],
-        role: params[offset + 4] || 'member',
+        role,
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -300,6 +308,24 @@ class MemoryDbStore {
       const id = params[0];
       const rec = this.vaultCredentials.get(id);
       return { rows: rec ? [{ ...rec }] : [], rowCount: rec ? 1 : 0 };
+    }
+
+    // 13a. Vault: SELECT ... FROM vault_credentials WHERE LOWER(service_name) = LOWER($1)
+    if (/SELECT .* FROM vault_credentials WHERE LOWER\(service_name\) = LOWER\(\$1\)/i.test(trimmed)) {
+      const target = (params[0] || '').toLowerCase();
+      const rec = Array.from(this.vaultCredentials.values()).find(
+        (v) => v.service_name.toLowerCase() === target
+      );
+      return { rows: rec ? [{ ...rec }] : [], rowCount: rec ? 1 : 0 };
+    }
+
+    // 13a2. Vault: SELECT ... FROM vault_credentials WHERE LOWER(service_name) LIKE LOWER($1)
+    if (/SELECT .* FROM vault_credentials WHERE LOWER\(service_name\) LIKE LOWER\(\$1\)/i.test(trimmed)) {
+      const raw = (params[0] || '').replace(/%/g, '').toLowerCase();
+      const matches = Array.from(this.vaultCredentials.values()).filter(
+        (v) => v.service_name.toLowerCase().includes(raw)
+      );
+      return { rows: matches.map((m) => ({ ...m })), rowCount: matches.length };
     }
 
     // 13b. Vault: SELECT ... FROM vault_credentials WHERE id = $1 OR service_name = $1

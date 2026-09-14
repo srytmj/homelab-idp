@@ -7,6 +7,61 @@ import { encryptAesGcm, decryptAesGcm } from './crypto/aes.js';
 import { signSessionToken, verifySessionToken } from './crypto/jwks.js';
 import { config } from './config/env.js';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(val: string): boolean {
+  return UUID_REGEX.test(val.trim());
+}
+
+async function resolveUser(target: string) {
+  const clean = target.trim();
+  if (isUuid(clean)) {
+    const byId = await query('SELECT * FROM users WHERE id = $1', [clean]);
+    if (byId.rows.length > 0) return byId.rows[0];
+  }
+  const byUsername = await query('SELECT * FROM users WHERE LOWER(username) = LOWER($1)', [clean]);
+  return byUsername.rows[0] || null;
+}
+
+async function resolveOidcClient(target: string) {
+  const clean = target.trim();
+  if (isUuid(clean)) {
+    const byId = await query('SELECT * FROM oidc_clients WHERE id = $1', [clean]);
+    if (byId.rows.length > 0) return byId.rows[0];
+  }
+  const byClientId = await query('SELECT * FROM oidc_clients WHERE client_id = $1', [clean]);
+  return byClientId.rows[0] || null;
+}
+
+async function resolveVaultCredential(target: string): Promise<any | null> {
+  const clean = target.trim();
+
+  // 1. If it's a valid UUID, search by ID directly
+  if (isUuid(clean)) {
+    const byId = await query('SELECT * FROM vault_credentials WHERE id = $1', [clean]);
+    if (byId.rows.length > 0) return byId.rows[0];
+  }
+
+  // 2. Exact match on service_name (case-insensitive)
+  const exact = await query('SELECT * FROM vault_credentials WHERE LOWER(service_name) = LOWER($1)', [clean]);
+  if (exact.rows.length > 0) return exact.rows[0];
+
+  // 3. Substring match on service_name (case-insensitive)
+  const partial = await query('SELECT * FROM vault_credentials WHERE LOWER(service_name) LIKE LOWER($1)', [`%${clean}%`]);
+  if (partial.rows.length === 1) {
+    return partial.rows[0];
+  } else if (partial.rows.length > 1) {
+    console.error(`Multiple credentials found matching '${clean}':`);
+    for (const r of partial.rows) {
+      console.error(`  - ${r.service_name} (UUID: ${r.id})`);
+    }
+    console.error('Please specify the exact service name or full UUID.');
+    process.exit(1);
+  }
+
+  return null;
+}
+
 interface ParsedArgs {
   command: string;
   subcommand: string;
@@ -102,9 +157,9 @@ COMMANDS:
   vault
     add, create     Store a new secret / password in the vault
     list            List credentials (masked or revealed)
-    get             Inspect a single credential by ID or service name
-    update          Update an existing credential
-    delete          Remove a credential from the vault
+    get             Inspect a single credential by service name or UUID
+    update          Update an existing credential by service name or UUID
+    delete          Remove a credential from the vault by service name or UUID
 
   token
     generate        Generate a signed session / bearer JWT token for any user
@@ -118,41 +173,36 @@ GLOBAL OPTIONS:
 
 EXAMPLES:
   # 1. Register an SSO user
-  homelab-idp user add --username alice --email alice@homelab.local --password "SecretPass123!" --role member
+  homelab-idp user add --username john --email john@local.dev --password MySecretPassword! --role admin
 
-  # 2. Update an SSO user profile
-  homelab-idp user update alice --email "alice.new@homelab.local" --display-name "Alice Smith"
+  # 2. Update vault password by service name
+  homelab-idp vault update Nextcloud --password "NewNextcloudSecretPass!"
 
-  # 3. Register an OIDC application (e.g. Nextcloud or Komga)
-  homelab-idp oidc register --name "Nextcloud Storage" --redirect-uri "https://cloud.homelab.local/apps/user_oidc/code"
-
-  # 4. Add credentials to vault
-  homelab-idp vault add --service "Proxmox Cluster" --username "root@pam" --password "PveP@ssword2026" --category "Infrastructure"
-
-  # 5. List credentials in JSON for AI agent processing
-  homelab-idp vault list --json --reveal
-
-  # 6. Generate a JWT token directly for automated scripts
-  homelab-idp token generate --username admin --hours 24
+  # 3. Delete vault entry by service name
+  homelab-idp vault delete Nextcloud
 `);
 }
 
 async function handleUser(subcommand: string, positionals: string[], options: Record<string, any>, isJson: boolean) {
-  if (subcommand === 'add' || subcommand === 'register' || subcommand === 'create') {
-    const username = getOption(options, ['username', 'u']) || positionals[0];
-    const email = getOption(options, ['email', 'e']);
+  if (subcommand === 'add' || subcommand === 'register') {
+    const username = getOption(options, ['username', 'u', 'user']) || positionals[0];
+    const email = getOption(options, ['email', 'e']) || positionals[1];
     const password = getOption(options, ['password', 'p', 'pass']);
     const displayName = getOption(options, ['name', 'display-name']) || username;
-    const role = (getOption(options, ['role', 'r']) || 'member').toLowerCase();
+    const role = getOption(options, ['role', 'r']) || 'member';
 
     if (!username || !email || !password) {
       console.error('Error: --username, --email, and --password are required.');
       process.exit(1);
     }
 
-    const check = await query('SELECT id FROM users WHERE username = $1 OR email = $2', [username.toLowerCase(), email.toLowerCase()]);
+    const check = await query(
+      'SELECT id FROM users WHERE username = $1 OR email = $2',
+      [username.toLowerCase(), email.toLowerCase()]
+    );
+
     if (check.rows.length > 0) {
-      console.error(`Error: User '${username}' or email '${email}' is already registered.`);
+      console.error(`Error: User with username '${username}' or email '${email}' already exists.`);
       process.exit(1);
     }
 
@@ -168,7 +218,7 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
     if (isJson) {
       console.log(JSON.stringify({ success: true, user }, null, 2));
     } else {
-      console.log(`User registered successfully.`);
+      console.log(`User '${user.username}' created successfully.\n`);
       console.log(`ID:           ${user.id}`);
       console.log(`Username:     ${user.username}`);
       console.log(`Email:        ${user.email}`);
@@ -183,18 +233,15 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
     if (isJson) {
       console.log(JSON.stringify({ users: res.rows }, null, 2));
     } else {
-      if (res.rows.length === 0) {
-        console.log('No users found.');
-        return;
-      }
       console.log(`Found ${res.rows.length} user(s):\n`);
       console.log(`USERNAME          ROLE      EMAIL                           DISPLAY NAME`);
       console.log(`----------------  --------  ------------------------------  -------------------`);
       for (const u of res.rows) {
-        const uname = u.username.padEnd(16).slice(0, 16);
-        const role = u.role.padEnd(8).slice(0, 8);
-        const email = u.email.padEnd(30).slice(0, 30);
-        console.log(`${uname}  ${role}  ${email}  ${u.display_name || '-'}`);
+        const un = u.username.padEnd(16).slice(0, 16);
+        const r = (u.role || 'member').padEnd(8).slice(0, 8);
+        const em = u.email.padEnd(30).slice(0, 30);
+        const dn = (u.display_name || '-').padEnd(19).slice(0, 19);
+        console.log(`${un}  ${r}  ${em}  ${dn}`);
       }
     }
     return;
@@ -209,13 +256,12 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
       process.exit(1);
     }
 
-    const check = await query('SELECT id, username FROM users WHERE id = $1 OR username = $1', [target]);
-    if (check.rows.length === 0) {
+    const user = await resolveUser(target);
+    if (!user) {
       console.error(`Error: User '${target}' not found.`);
       process.exit(1);
     }
 
-    const user = check.rows[0];
     const passwordHash = await hashPassword(password);
     await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, user.id]);
 
@@ -234,13 +280,12 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
       process.exit(1);
     }
 
-    const check = await query('SELECT * FROM users WHERE id = $1 OR username = $1', [target]);
-    if (check.rows.length === 0) {
+    const user = await resolveUser(target);
+    if (!user) {
       console.error(`Error: User '${target}' not found.`);
       process.exit(1);
     }
 
-    const user = check.rows[0];
     const newUsername = getOption(options, ['username', 'u'])?.toLowerCase();
     const newEmail = getOption(options, ['email', 'e'])?.toLowerCase();
     const newDisplayName = getOption(options, ['display-name', 'name']);
@@ -302,13 +347,12 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
       process.exit(1);
     }
 
-    const check = await query('SELECT id, username FROM users WHERE id = $1 OR username = $1', [target]);
-    if (check.rows.length === 0) {
+    const user = await resolveUser(target);
+    if (!user) {
       console.error(`Error: User '${target}' not found.`);
       process.exit(1);
     }
 
-    const user = check.rows[0];
     await query('DELETE FROM users WHERE id = $1', [user.id]);
 
     if (isJson) {
@@ -348,7 +392,9 @@ async function handleOidc(subcommand: string, positionals: string[], options: Re
     const scopes = scopeStr.split(' ').map((s) => s.trim()).filter(Boolean);
 
     const insertRes = await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)\n       VALUES ($1, $2, $3, $4, $5)\n       RETURNING id, client_id, client_name, redirect_uris, scopes, created_at`,
+      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, client_id, client_name, redirect_uris, scopes, created_at`,
       [clientId, secretHash, name, uris, scopes]
     );
 
@@ -396,19 +442,18 @@ async function handleOidc(subcommand: string, positionals: string[], options: Re
       process.exit(1);
     }
 
-    const check = await query('SELECT id, client_id, client_name FROM oidc_clients WHERE id = $1 OR client_id = $1', [target]);
-    if (check.rows.length === 0) {
-      console.error(`Error: OIDC Client '${target}' not found.`);
+    const client = await resolveOidcClient(target);
+    if (!client) {
+      console.error(`Error: OIDC client '${target}' not found.`);
       process.exit(1);
     }
 
-    const client = check.rows[0];
     await query('DELETE FROM oidc_clients WHERE id = $1', [client.id]);
 
     if (isJson) {
-      console.log(JSON.stringify({ success: true, message: `Deleted OIDC client ${client.client_name} (${client.client_id})` }, null, 2));
+      console.log(JSON.stringify({ success: true, message: `Deleted OIDC client ${client.client_id}`, id: client.id }, null, 2));
     } else {
-      console.log(`OIDC Client '${client.client_name}' (${client.client_id}) deleted.`);
+      console.log(`OIDC client '${client.client_id}' (UUID: ${client.id}) deleted successfully.`);
     }
     return;
   }
@@ -537,17 +582,16 @@ async function handleVault(subcommand: string, positionals: string[], options: R
     const reveal = !!options['reveal'] || !!options['r'];
 
     if (!target) {
-      console.error('Error: target ID or service name is required.');
+      console.error('Error: target service name or UUID is required.');
       process.exit(1);
     }
 
-    const res = await query('SELECT * FROM vault_credentials WHERE id = $1 OR service_name = $1', [target]);
-    if (res.rows.length === 0) {
-      console.error(`Error: Credential '${target}' not found.`);
+    const row = await resolveVaultCredential(target);
+    if (!row) {
+      console.error(`Error: Credential matching '${target}' not found in vault.`);
       process.exit(1);
     }
 
-    const row = res.rows[0];
     let password = '••••••••••••';
     let notes = '';
 
@@ -599,17 +643,16 @@ async function handleVault(subcommand: string, positionals: string[], options: R
   if (subcommand === 'update') {
     const target = positionals[0] || getOption(options, ['id', 'service']);
     if (!target) {
-      console.error('Error: target ID or service name is required.');
+      console.error('Error: target service name or UUID is required.');
       process.exit(1);
     }
 
-    const check = await query('SELECT * FROM vault_credentials WHERE id = $1 OR service_name = $1', [target]);
-    if (check.rows.length === 0) {
-      console.error(`Error: Credential '${target}' not found.`);
+    const existing = await resolveVaultCredential(target);
+    if (!existing) {
+      console.error(`Error: Credential matching '${target}' not found in vault.`);
       process.exit(1);
     }
 
-    const existing = check.rows[0];
     const service = getOption(options, ['service', 'service-name', 'name']) || existing.service_name;
     const username = getOption(options, ['username', 'u', 'user']) || existing.username;
     const category = getOption(options, ['category', 'cat']) || existing.category;
@@ -635,9 +678,9 @@ async function handleVault(subcommand: string, positionals: string[], options: R
     );
 
     if (isJson) {
-      console.log(JSON.stringify({ success: true, message: `Updated credential ${service}` }, null, 2));
+      console.log(JSON.stringify({ success: true, message: `Updated credential ${service}`, id: existing.id }, null, 2));
     } else {
-      console.log(`Credential '${service}' updated successfully.`);
+      console.log(`Credential '${service}' (UUID: ${existing.id}) updated successfully.`);
     }
     return;
   }
@@ -645,23 +688,22 @@ async function handleVault(subcommand: string, positionals: string[], options: R
   if (subcommand === 'delete') {
     const target = positionals[0] || getOption(options, ['id', 'service']);
     if (!target) {
-      console.error('Error: target ID or service name is required.');
+      console.error('Error: target service name or UUID is required.');
       process.exit(1);
     }
 
-    const check = await query('SELECT id, service_name FROM vault_credentials WHERE id = $1 OR service_name = $1', [target]);
-    if (check.rows.length === 0) {
-      console.error(`Error: Credential '${target}' not found.`);
+    const item = await resolveVaultCredential(target);
+    if (!item) {
+      console.error(`Error: Credential matching '${target}' not found in vault.`);
       process.exit(1);
     }
 
-    const item = check.rows[0];
     await query('DELETE FROM vault_credentials WHERE id = $1', [item.id]);
 
     if (isJson) {
-      console.log(JSON.stringify({ success: true, message: `Deleted credential ${item.service_name}` }, null, 2));
+      console.log(JSON.stringify({ success: true, message: `Deleted credential ${item.service_name}`, id: item.id }, null, 2));
     } else {
-      console.log(`Credential '${item.service_name}' deleted from vault.`);
+      console.log(`Credential '${item.service_name}' (UUID: ${item.id}) deleted from vault.`);
     }
     return;
   }
@@ -680,13 +722,12 @@ async function handleToken(subcommand: string, positionals: string[], options: R
       process.exit(1);
     }
 
-    const userRes = await query('SELECT * FROM users WHERE username = $1 OR id = $1', [username.toLowerCase()]);
-    if (userRes.rows.length === 0) {
+    const user = await resolveUser(username);
+    if (!user) {
       console.error(`Error: User '${username}' not found.`);
       process.exit(1);
     }
 
-    const user = userRes.rows[0];
     const token = await signSessionToken(
       {
         userId: user.id,
@@ -732,8 +773,8 @@ async function handleForwardAuth(subcommand: string, positionals: string[], opti
       process.exit(1);
     }
 
-    const userRes = await query('SELECT * FROM users WHERE id = $1 OR username = $2', [payload.userId, payload.username]);
-    if (userRes.rows.length === 0) {
+    const user = await resolveUser(payload.username);
+    if (!user) {
       if (isJson) {
         console.log(JSON.stringify({ status: 401, error: 'Unauthorized', message: 'User not found' }, null, 2));
       } else {
@@ -742,7 +783,6 @@ async function handleForwardAuth(subcommand: string, positionals: string[], opti
       process.exit(1);
     }
 
-    const user = userRes.rows[0];
     const headers = {
       'Remote-User': user.username,
       'Remote-Email': user.email,

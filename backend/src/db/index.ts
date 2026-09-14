@@ -68,9 +68,24 @@ export async function initDb(quiet = false): Promise<void> {
       console.log('[Database] Successfully connected to PostgreSQL.');
     }
   } catch (err: any) {
+    const isProduction = config.nodeEnv === 'production' || process.env.STRICT_DB === 'true';
+    if (isProduction) {
+      console.error('\n' + '='.repeat(70));
+      console.error('[FATAL DATABASE ERROR] Production startup aborted!');
+      console.error(`PostgreSQL connection to '${config.databaseUrl.replace(/:[^:@]+@/, ':****@')}' failed:`);
+      console.error(`-> ${err.message}`);
+      console.error('');
+      console.error('In-memory database fallback is STRICTLY DISABLED in production');
+      console.error('to prevent silent reset, credential loss, or container desynchronization.');
+      console.error('Please ensure your PostgreSQL container and network are up and reachable.');
+      console.error('homelab-idp is exiting with code 1 (fail-fast).');
+      console.error('='.repeat(70) + '\n');
+      process.exit(1);
+    }
+
     if (!quiet) {
       console.warn(`[Database] PostgreSQL connection failed (${err.message}).`);
-      console.warn('[Database] Falling back to high-fidelity In-Memory Database store for dev/testing.');
+      console.warn(`[Database] [DEV/TEST ONLY] Falling back to high-fidelity In-Memory Database store (NODE_ENV=${config.nodeEnv}).`);
     }
     isUsingMemoryDb = true;
   }
@@ -93,13 +108,49 @@ async function runMigrations(quiet = false): Promise<void> {
     CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
     CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-    CREATE TABLE IF NOT EXISTS users (\n      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n      username VARCHAR(64) UNIQUE NOT NULL,\n      email VARCHAR(128) UNIQUE NOT NULL,\n      password_hash TEXT NOT NULL,\n      display_name VARCHAR(128),\n      avatar_url TEXT,\n      role VARCHAR(20) DEFAULT 'admin',\n      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),\n      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n    );
+    CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      username VARCHAR(64) UNIQUE NOT NULL,
+      email VARCHAR(128) UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      display_name VARCHAR(128),
+      avatar_url TEXT,
+      role VARCHAR(20) DEFAULT 'admin',
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
 
-    CREATE TABLE IF NOT EXISTS oidc_clients (\n      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n      client_id VARCHAR(64) UNIQUE NOT NULL,\n      client_secret_hash TEXT NOT NULL,\n      client_name VARCHAR(128) NOT NULL,\n      redirect_uris TEXT[] NOT NULL,\n      scopes TEXT[] DEFAULT ARRAY['openid', 'profile', 'email'],\n      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n    );
+    CREATE TABLE IF NOT EXISTS oidc_clients (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id VARCHAR(64) UNIQUE NOT NULL,
+      client_secret_hash TEXT NOT NULL,
+      client_name VARCHAR(128) NOT NULL,
+      redirect_uris TEXT[] NOT NULL,
+      scopes TEXT[] DEFAULT ARRAY['openid', 'profile', 'email'],
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
 
-    CREATE TABLE IF NOT EXISTS oidc_auth_codes (\n      code VARCHAR(128) PRIMARY KEY,\n      client_id VARCHAR(64) REFERENCES oidc_clients(client_id) ON DELETE CASCADE,\n      user_id UUID REFERENCES users(id) ON DELETE CASCADE,\n      redirect_uri TEXT NOT NULL,\n      scope TEXT NOT NULL,\n      expires_at TIMESTAMP WITH TIME ZONE NOT NULL,\n      used BOOLEAN DEFAULT FALSE\n    );
+    CREATE TABLE IF NOT EXISTS oidc_auth_codes (
+      code VARCHAR(128) PRIMARY KEY,
+      client_id VARCHAR(64) REFERENCES oidc_clients(client_id) ON DELETE CASCADE,
+      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+      redirect_uri TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+      used BOOLEAN DEFAULT FALSE
+    );
 
-    CREATE TABLE IF NOT EXISTS vault_credentials (\n      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n      service_name VARCHAR(128) NOT NULL,\n      category VARCHAR(64) DEFAULT 'General',\n      service_url TEXT,\n      username VARCHAR(128) NOT NULL,\n      encrypted_password TEXT NOT NULL,\n      encrypted_notes TEXT,\n      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),\n      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n    );
+    CREATE TABLE IF NOT EXISTS vault_credentials (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      service_name VARCHAR(128) NOT NULL,
+      category VARCHAR(64) DEFAULT 'General',
+      service_url TEXT,
+      username VARCHAR(128) NOT NULL,
+      encrypted_password TEXT NOT NULL,
+      encrypted_notes TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
   `;
 
   if (!isUsingMemoryDb && pool) {
@@ -119,13 +170,14 @@ async function seedInitialAdmin(quiet = false): Promise<void> {
     if (!quiet) console.log(`[Database] Seeding initial admin account '${config.initialAdmin.username}'...`);
     const passwordHash = await hashPassword(config.initialAdmin.password);
     await query(
-      `INSERT INTO users (username, email, password_hash, display_name, role)\n       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO users (username, email, password_hash, display_name, role)
+       VALUES ($1, $2, $3, $4, 'admin')
+       ON CONFLICT (username) DO NOTHING`,
       [
-        config.initialAdmin.username,
-        config.initialAdmin.email,
+        config.initialAdmin.username.toLowerCase(),
+        config.initialAdmin.email.toLowerCase(),
         passwordHash,
         config.initialAdmin.displayName,
-        'admin',
       ]
     );
     if (!quiet) console.log('[Database] Initial admin user seeded successfully.');
@@ -133,31 +185,25 @@ async function seedInitialAdmin(quiet = false): Promise<void> {
 }
 
 async function seedDefaultClients(): Promise<void> {
-  const check = await query('SELECT * FROM oidc_clients WHERE client_id = $1', ['komga-oidc']);
-  if (check.rows.length === 0) {
-    const secretHash = await hashPassword('komga_homelab_secret_2026');
+  const countRes = await query('SELECT COUNT(*) FROM oidc_clients');
+  const count = parseInt(countRes.rows[0]?.count || '0', 10);
+
+  if (count === 0) {
+    const defaultSecret = 'komga_homelab_secret_2026';
+    const secretHash = await hashPassword(defaultSecret);
     await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)\n       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (client_id) DO NOTHING`,
       [
         'komga-oidc',
         secretHash,
-        'Komga Media Server',
-        ['https://komga.homelab.internal/login/oauth2/code/homelab-idp', 'http://localhost:8080/login/oauth2/code/homelab-idp'],
-        ['openid', 'profile', 'email'],
-      ]
-    );
-  }
-
-  const checkNextcloud = await query('SELECT * FROM oidc_clients WHERE client_id = $1', ['nextcloud-oidc']);
-  if (checkNextcloud.rows.length === 0) {
-    const secretHash = await hashPassword('nextcloud_homelab_secret_2026');
-    await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)\n       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        'nextcloud-oidc',
-        secretHash,
-        'Nextcloud Storage',
-        ['https://cloud.homelab.internal/apps/user_oidc/code', 'http://localhost:8081/apps/user_oidc/code'],
+        'Komga Comic & Manga Server',
+        [
+          'https://komga.homelab.local/oauth2/code/homelab',
+          'http://localhost:8080/oauth2/code/homelab',
+          'http://localhost:8080/login/oauth2/code/homelab-idp',
+        ],
         ['openid', 'profile', 'email'],
       ]
     );
@@ -165,49 +211,44 @@ async function seedDefaultClients(): Promise<void> {
 }
 
 async function seedDefaultVault(): Promise<void> {
-  const existing = await query('SELECT * FROM vault_credentials');
-  if (existing.rows.length === 0) {
+  const countRes = await query('SELECT COUNT(*) FROM vault_credentials');
+  const count = parseInt(countRes.rows[0]?.count || '0', 10);
+
+  if (count === 0) {
     const samples = [
-      {
-        service_name: 'Nginx Proxy Manager',
-        category: 'Network',
-        service_url: 'http://npm.homelab.internal:81',
-        username: 'admin@homelab.internal',
-        password: 'ChangeMe_NPM_Admin_2026!',
-        notes: 'Master reverse proxy configuration dashboard',
-      },
-      {
-        service_name: 'Navidrome Music Streamer',
-        category: 'Media',
-        service_url: 'https://music.homelab.internal',
-        username: 'audiophile_admin',
-        password: 'VaultPass_Navidrome_Secret_99',
-        notes: 'Connected via Subsonic API to mobile clients',
-      },
       {
         service_name: 'Proxmox VE Cluster',
         category: 'Infrastructure',
-        service_url: 'https://192.168.1.100:8006',
+        service_url: 'https://pve.homelab.local:8006',
         username: 'root@pam',
-        password: 'PVE_Cluster_Master_Node01#',
-        notes: 'API Token ID: root@pam!backup-token',
+        password: 'PveRootPassword2026!',
+        notes: 'Node 1: 192.168.1.10. 2FA enabled on YubiKey backup.',
       },
       {
-        service_name: 'Pi-hole DNS & AdBlock',
-        category: 'Network',
-        service_url: 'http://pihole.homelab.internal/admin',
+        service_name: 'Nextcloud Hub',
+        category: 'Storage',
+        service_url: 'https://cloud.homelab.local',
         username: 'admin',
-        password: 'SecurePiHolePassword_2026',
-        notes: 'Primary DNS server: 192.168.1.2',
+        password: 'NextcloudAdminSecretPass!',
+        notes: 'S3 primary storage backend with MinIO.',
+      },
+      {
+        service_name: 'OPNsense Firewall',
+        category: 'Network',
+        service_url: 'https://router.homelab.local',
+        username: 'root',
+        password: 'OpnRouterP@ssword2026',
+        notes: 'VLAN 10: Management, VLAN 20: Trusted, VLAN 30: IoT.',
       },
     ];
 
-    for (const item of samples) {
-      const encPass = encryptAesGcm(item.password, config.vaultSecretKey);
-      const encNotes = encryptAesGcm(item.notes, config.vaultSecretKey);
+    for (const s of samples) {
+      const encPass = encryptAesGcm(s.password, config.vaultSecretKey);
+      const encNotes = encryptAesGcm(s.notes, config.vaultSecretKey);
       await query(
-        `INSERT INTO vault_credentials (service_name, category, service_url, username, encrypted_password, encrypted_notes)\n         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [item.service_name, item.category, item.service_url, item.username, encPass, encNotes]
+        `INSERT INTO vault_credentials (service_name, category, service_url, username, encrypted_password, encrypted_notes)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [s.service_name, s.category, s.service_url, s.username, encPass, encNotes]
       );
     }
   }

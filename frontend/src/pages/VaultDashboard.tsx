@@ -14,9 +14,12 @@ import {
   Plus,
   Server,
   FileText,
+  KeyRound,
+  Pencil,
 } from 'lucide-react';
 import { api, VaultItem, User } from '../api/client';
 import { VaultModal } from '../components/VaultModal';
+import { EditVaultModal } from '../components/EditVaultModal';
 import { OidcModal } from '../components/OidcModal';
 import { ForwardAuthGuideModal } from '../components/ForwardAuthGuideModal';
 
@@ -51,7 +54,11 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
 
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Edit modal state
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<VaultItem | null>(null);
+  const [editFocusField, setEditFocusField] = useState<'password' | 'url' | 'notes' | 'all'>('all');
 
   const fetchCredentials = async () => {
     try {
@@ -83,6 +90,12 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
     }));
   };
 
+  const openEditModal = (item: VaultItem, field: 'password' | 'url' | 'notes' | 'all' = 'all') => {
+    setEditingItem(item);
+    setEditFocusField(field);
+    setIsEditModalOpen(true);
+  };
+
   const handleSaveCredential = async (data: {
     service_name: string;
     category: string;
@@ -99,11 +112,12 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
       onShowToast(`Saved ${data.service_name}`, 'success');
     }
     setEditingItem(null);
+    setIsEditModalOpen(false);
     fetchCredentials();
   };
 
   const handleDelete = async (item: VaultItem) => {
-    if (!confirm(`Delete '${item.service_name}' credentials?`)) {
+    if (!confirm(`Hapus kredensial '${item.service_name}' dari vault?`)) {
       return;
     }
 
@@ -153,7 +167,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
             Vault Credentials
           </h1>
           <p className="text-xs text-zinc-400 mt-0.5">
-            Encrypted with AES-256-GCM. Fast search and one-click copy.
+            Terenkripsi AES-256-GCM. Edit Password, URL, & Catatan langsung dari UI.
           </p>
         </div>
 
@@ -176,7 +190,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
           <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
-            placeholder="Search credentials (service, username, url)..."
+            placeholder="Cari kredensial (service, username, url, notes)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-4 py-1.5 bg-zinc-900/80 border border-zinc-800 rounded-md text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors font-mono"
@@ -223,7 +237,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
               setEditingItem(null);
               setIsNewModalOpen(true);
             }}
-            className="px-3 py-1.5 rounded-md bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs transition-colors flex items-center gap-1.5"
+            className="px-3 py-1.5 rounded-md bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs transition-colors flex items-center gap-1.5 shadow-sm"
           >
             <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
             <span>Add Entry</span>
@@ -247,7 +261,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
               }`}
             >
               <span>{cat}</span>
-              <span className={`text-[10px] ${isSelected ? 'text-zinc-600 font-bold' : 'text-zinc-500'}`}>
+              <span className={`text-[10px] ${isSelected ? 'text-zinc-600 font-bold' : 'text-zinc-500'}`}>\
                 {count}
               </span>
             </button>
@@ -284,7 +298,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
             return (
               <div
                 key={item.id}
-                className="rounded-lg bg-[#111113] border border-zinc-800 hover:border-zinc-700 transition-colors p-4 flex flex-col justify-between space-y-3 font-mono"
+                className="rounded-lg bg-[#111113] border border-zinc-800 hover:border-zinc-700 transition-colors p-4 flex flex-col justify-between space-y-3 font-mono group"
               >
                 {/* Header */}
                 <div className="space-y-1">
@@ -303,17 +317,26 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                       </div>
                     </div>
 
-                    {item.service_url && (
-                      <a
-                        href={item.service_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="p-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
-                        title="Open URL"
+                    <div className="flex items-center gap-1">
+                      {item.service_url && (
+                        <a
+                          href={item.service_url.startsWith('http') ? item.service_url : `http://${item.service_url}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="p-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+                          title="Open URL"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                      <button
+                        onClick={() => openEditModal(item, 'url')}
+                        className="p-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors opacity-80 group-hover:opacity-100"
+                        title="Edit URL"
                       >
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
+                        <Pencil className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
 
                   {item.service_url && (
@@ -348,11 +371,21 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                     </div>
                   </div>
 
-                  {/* Password */}
+                  {/* Password with Quick Edit */}
                   <div>
-                    <span className="text-[10px] text-zinc-400 uppercase tracking-wider block mb-0.5">
-                      Password
-                    </span>
+                    <div className="flex items-center justify-between mb-0.5">
+                      <span className="text-[10px] text-zinc-400 uppercase tracking-wider">
+                        Password
+                      </span>
+                      <button
+                        onClick={() => openEditModal(item, 'password')}
+                        className="text-[10px] text-zinc-400 hover:text-white flex items-center gap-1 transition-colors"
+                        title="Ubah Password"
+                      >
+                        <Pencil className="w-2.5 h-2.5" />
+                        <span>Ubah</span>
+                      </button>
+                    </div>
                     <div className="flex items-center justify-between bg-zinc-950 px-2.5 py-1 rounded border border-zinc-800">
                       <span className="text-zinc-200 truncate select-all text-xs">
                         {isRevealed ? item.password : '••••••••••••'}
@@ -381,34 +414,56 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                   </div>
 
                   {/* Notes */}
-                  {item.notes && (
+                  {item.notes ? (
                     <div className="pt-0.5">
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-[10px] text-zinc-500 uppercase">Notes</span>
+                        <button
+                          onClick={() => openEditModal(item, 'notes')}
+                          className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                          title="Edit Catatan"
+                        >
+                          Edit
+                        </button>
+                      </div>
                       <div className="bg-zinc-950 p-1.5 rounded border border-zinc-800/80 text-[11px] text-zinc-400 line-clamp-2 select-all">
                         {item.notes}
                       </div>
+                    </div>
+                  ) : (
+                    <div className="pt-0.5 flex justify-end">
+                      <button
+                        onClick={() => openEditModal(item, 'notes')}
+                        className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors inline-flex items-center gap-1"
+                      >
+                        <Plus className="w-2.5 h-2.5" />
+                        <span>Tambah Catatan</span>
+                      </button>
                     </div>
                   )}
                 </div>
 
                 {/* Card Actions */}
-                <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-zinc-800/80 text-xs">
-                  <button
-                    onClick={() => {
-                      setEditingItem(item);
-                      setIsNewModalOpen(true);
-                    }}
-                    className="px-2 py-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors flex items-center gap-1"
-                  >
-                    <Edit2 className="w-3 h-3" />
-                    <span>Edit</span>
-                  </button>
-                  <button
-                    onClick={() => handleDelete(item)}
-                    className="px-2 py-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors flex items-center gap-1"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    <span>Delete</span>
-                  </button>
+                <div className="flex items-center justify-between pt-2.5 border-t border-zinc-800/80 text-xs">
+                  <span className="text-[10px] text-zinc-400 font-mono">
+                    ID: {item.id.slice(0, 8)}...
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => openEditModal(item, 'all')}
+                      className="px-2.5 py-1 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-100 border border-zinc-700 hover:border-zinc-600 transition-colors flex items-center gap-1.5 text-xs font-medium shadow-sm"
+                    >
+                      <Edit2 className="w-3 h-3" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      onClick={() => handleDelete(item)}
+                      className="px-2 py-1 rounded text-zinc-400 hover:text-red-300 hover:bg-red-950/30 transition-colors flex items-center gap-1 text-xs"
+                      title="Hapus Kredensial"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -433,14 +488,23 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                 {filteredItems.map((item) => {
                   const isRevealed = !!revealedPasswords[item.id];
                   return (
-                    <tr key={item.id} className="hover:bg-zinc-900/50 transition-colors">
+                    <tr key={item.id} className="hover:bg-zinc-900/50 transition-colors group">
                       <td className="px-3 py-2">
-                        <span className="font-semibold text-white block font-sans">
-                          {item.service_name}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-white block font-sans">
+                            {item.service_name}
+                          </span>
+                          <button
+                            onClick={() => openEditModal(item, 'all')}
+                            className="text-zinc-400 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Edit"
+                          >
+                            <Pencil className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                         {item.service_url && (
                           <a
-                            href={item.service_url}
+                            href={item.service_url.startsWith('http') ? item.service_url : `http://${item.service_url}`}
                             target="_blank"
                             rel="noreferrer"
                             className="text-[11px] text-zinc-400 hover:text-white inline-flex items-center gap-1"
@@ -479,12 +543,14 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                           <button
                             onClick={() => togglePasswordReveal(item.id)}
                             className="text-zinc-400 hover:text-white"
+                            title={isRevealed ? 'Hide' : 'Show'}
                           >
                             {isRevealed ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
                           </button>
                           <button
                             onClick={() => handleCopy(item.password, `pass-t-${item.id}`, 'Password')}
                             className="text-zinc-400 hover:text-white"
+                            title="Copy Password"
                           >
                             {copiedKey === `pass-t-${item.id}` ? (
                               <Check className="w-3 h-3 text-zinc-200" />
@@ -492,29 +558,52 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                               <Copy className="w-3 h-3" />
                             )}
                           </button>
+                          <button
+                            onClick={() => openEditModal(item, 'password')}
+                            className="text-zinc-400 hover:text-white ml-1 p-0.5"
+                            title="Ubah Password"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
                         </div>
                       </td>
 
                       <td className="px-3 py-2 text-zinc-400 max-w-xs truncate text-[11px]">
-                        {item.notes || '-'}
+                        {item.notes ? (
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate">{item.notes}</span>
+                            <button
+                              onClick={() => openEditModal(item, 'notes')}
+                              className="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100"
+                              title="Edit Catatan"
+                            >
+                              <Pencil className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => openEditModal(item, 'notes')}
+                            className="text-[11px] text-zinc-500 hover:text-zinc-400 italic"
+                          >
+                            + catatan
+                          </button>
+                        )}
                       </td>
 
                       <td className="px-3 py-2 text-right">
-                        <div className="flex items-center justify-end gap-1">
+                        <div className="flex items-center justify-end gap-1.5">
                           <button
-                            onClick={() => {
-                              setEditingItem(item);
-                              setIsNewModalOpen(true);
-                            }}
-                            className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-                            title="Edit"
+                            onClick={() => openEditModal(item, 'all')}
+                            className="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors flex items-center gap-1 text-[11px]"
+                            title="Edit Kredensial"
                           >
                             <Edit2 className="w-3 h-3" />
+                            <span>Edit</span>
                           </button>
                           <button
                             onClick={() => handleDelete(item)}
-                            className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-                            title="Delete"
+                            className="p-1 rounded text-zinc-400 hover:text-red-300 hover:bg-red-950/30 transition-colors"
+                            title="Hapus"
                           >
                             <Trash2 className="w-3 h-3" />
                           </button>
@@ -529,7 +618,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
         </div>
       )}
 
-      {/* Modals */}
+      {/* New Vault Entry Modal */}
       <VaultModal
         isOpen={isNewModalOpen}
         onClose={() => {
@@ -537,7 +626,19 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
           setEditingItem(null);
         }}
         onSave={handleSaveCredential}
-        initialData={editingItem}
+        initialData={null}
+      />
+
+      {/* Dedicated Edit Vault Modal (Password, URL, Notes) */}
+      <EditVaultModal
+        isOpen={isEditModalOpen}
+        onClose={() => {
+          setIsEditModalOpen(false);
+          setEditingItem(null);
+        }}
+        item={editingItem}
+        initialFocusField={editFocusField}
+        onSave={handleSaveCredential}
       />
 
       <OidcModal
