@@ -16,7 +16,6 @@ const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
   displayName: z.string().optional(),
-  role: z.enum(['admin', 'member']).optional().default('member'),
 });
 
 export async function authRoutes(fastify: FastifyInstance) {
@@ -40,7 +39,7 @@ export async function authRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const { username, email, password, displayName, role } = parsed.data;
+      const { username, email, password, displayName } = parsed.data;
 
       // Check if username already exists
       const existingUser = await query('SELECT id FROM users WHERE username = $1', [username.toLowerCase()]);
@@ -65,7 +64,7 @@ export async function authRoutes(fastify: FastifyInstance) {
         `INSERT INTO users (username, email, password_hash, display_name, role)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, username, email, display_name, role, created_at`,
-        [username.toLowerCase(), email.toLowerCase(), passwordHash, displayName || username, role]
+        [username.toLowerCase(), email.toLowerCase(), passwordHash, displayName || username, 'member']
       );
 
       const newUser = insertRes.rows[0];

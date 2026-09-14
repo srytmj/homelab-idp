@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { query } from '../db/index.js';
 import { encryptAesGcm, decryptAesGcm } from '../crypto/aes.js';
 import { config } from '../config/env.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const vaultItemSchema = z.object({
   service_name: z.string().min(1, 'Service name is required'),
@@ -24,8 +24,8 @@ const updateVaultItemSchema = z.object({
 });
 
 export async function vaultRoutes(fastify: FastifyInstance) {
-  // All vault routes require authentication
-  fastify.addHook('preHandler', requireAuth);
+  // All vault routes require admin privileges
+  fastify.addHook('preHandler', requireAdmin);
 
   // GET /api/vault
   fastify.get('/', async (request: FastifyRequest, reply: FastifyReply) => {

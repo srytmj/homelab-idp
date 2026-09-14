@@ -5,13 +5,24 @@ import path from 'path';
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
+function requireSecret(name: string, minLength: number): string {
+  const value = process.env[name];
+  if (!value || value.length < minLength) {
+    throw new Error(
+      `Missing or insufficient ${name}: must be set to a random value of at least ${minLength} characters. ` +
+        `Refusing to start with a default/fallback secret.`
+    );
+  }
+  return value;
+}
+
 export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   appUrl: (process.env.APP_URL || 'http://localhost:4000').replace(/\/+$/, ''),
   databaseUrl: process.env.DATABASE_URL || 'postgres://admin:password@localhost:5432/homelab_idp?sslmode=disable',
-  vaultSecretKey: process.env.VAULT_SECRET_KEY || 'homelab_idp_default_vault_secret_key_32_bytes!',
-  jwtSecret: process.env.JWT_SECRET || 'homelab_idp_default_jwt_secret_must_be_long_and_secure_64_chars_min_length',
+  vaultSecretKey: requireSecret('VAULT_SECRET_KEY', 32),
+  jwtSecret: requireSecret('JWT_SECRET', 32),
   sessionTtlHours: parseInt(process.env.SESSION_TTL_HOURS || '720', 10),
   initialAdmin: {
     username: process.env.INITIAL_ADMIN_USERNAME || 'admin',
