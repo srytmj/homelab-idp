@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api, User } from './api/client';
 import { Login } from './pages/Login';
-import { Consent } from './pages/Consent';
 import { VaultDashboard } from './pages/VaultDashboard';
 import { Navbar } from './components/Navbar';
 import { ToastContainer, ToastMessage } from './components/Toast';
@@ -13,7 +12,6 @@ export function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
-  const [isOidcModalOpen, setIsOidcModalOpen] = useState(false);
   const [isGuideModalOpen, setIsGuideModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
@@ -72,23 +70,13 @@ export function App() {
     );
   }
 
-  const isConsentRoute = pathname === '/consent';
   const isLoginRoute = pathname === '/login';
 
   return (
     <div className="min-h-screen flex flex-col bg-[#09090b] text-zinc-100 selection:bg-zinc-800 selection:text-white">
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
-      {isConsentRoute ? (
-        user ? (
-          <Consent user={user} />
-        ) : (
-          <Login
-            onLoginSuccess={(loggedInUser) => setUser(loggedInUser)}
-            returnUrl={window.location.href}
-          />
-        )
-      ) : !user || isLoginRoute ? (
+      {!user || isLoginRoute ? (
         <Login
           onLoginSuccess={(loggedInUser) => {
             setUser(loggedInUser);
@@ -103,7 +91,6 @@ export function App() {
           <Navbar
             user={user}
             onOpenNewModal={() => setIsNewModalOpen(true)}
-            onOpenOidcModal={() => setIsOidcModalOpen(true)}
             onOpenGuideModal={() => setIsGuideModalOpen(true)}
             onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
             onLogout={handleLogout}
@@ -114,8 +101,6 @@ export function App() {
               onShowToast={showToast}
               isNewModalOpen={isNewModalOpen}
               setIsNewModalOpen={setIsNewModalOpen}
-              isOidcModalOpen={isOidcModalOpen}
-              setIsOidcModalOpen={setIsOidcModalOpen}
               isGuideModalOpen={isGuideModalOpen}
               setIsGuideModalOpen={setIsGuideModalOpen}
             />

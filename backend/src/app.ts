@@ -11,7 +11,6 @@ import { fileURLToPath } from 'url';
 import { config } from './config/env.js';
 import { authRoutes } from './routes/auth.js';
 import { forwardAuthRoutes } from './routes/forwardAuth.js';
-import { oidcRoutes } from './routes/oidc.js';
 import { vaultRoutes } from './routes/vault.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,7 +41,6 @@ export async function buildApp() {
   // CORS configuration
   await fastify.register(cors, {
     origin: (origin, cb) => {
-      // Allow all origins in homelab or local dev
       cb(null, true);
     },
     credentials: true,
@@ -51,7 +49,7 @@ export async function buildApp() {
     exposedHeaders: ['Remote-User', 'Remote-Email', 'Remote-Name', 'Remote-Groups'],
   });
 
-  // Form body parsing for OAuth2 token requests (application/x-www-form-urlencoded)
+  // Form body parsing
   await fastify.register(formbody);
 
   // Cookie parsing for homelab_session
@@ -62,7 +60,7 @@ export async function buildApp() {
 
   // Rate Limiting
   await fastify.register(rateLimit, {
-    global: false, // Applied per-route where needed
+    global: false,
   });
 
   // Health check endpoint
@@ -74,10 +72,9 @@ export async function buildApp() {
     };
   });
 
-  // Register API routes
+  // Core API Routes (Auth, Nginx Forward-Auth SSO, & Credential Vault)
   await fastify.register(authRoutes, { prefix: '/api/auth' });
   await fastify.register(forwardAuthRoutes, { prefix: '/api/auth' });
-  await fastify.register(oidcRoutes);
   await fastify.register(vaultRoutes, { prefix: '/api/vault' });
 
   // Frontend static serving for SPA (if frontend/dist exists)
@@ -99,7 +96,7 @@ export async function buildApp() {
 
     // SPA fallback: any non-API GET route serves index.html
     fastify.setNotFoundHandler((request, reply) => {
-      if (request.raw.url && (request.raw.url.startsWith('/api') || request.raw.url.startsWith('/.well-known'))) {
+      if (request.raw.url && request.raw.url.startsWith('/api')) {
         return reply.status(404).send({ error: 'Not Found', path: request.raw.url });
       }
 

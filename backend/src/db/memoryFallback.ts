@@ -12,26 +12,6 @@ interface UserRecord {
   updated_at: Date;
 }
 
-interface OidcClientRecord {
-  id: string;
-  client_id: string;
-  client_secret_hash: string;
-  client_name: string;
-  redirect_uris: string[];
-  scopes: string[];
-  created_at: Date;
-}
-
-interface OidcAuthCodeRecord {
-  code: string;
-  client_id: string;
-  user_id: string;
-  redirect_uri: string;
-  scope: string;
-  expires_at: Date;
-  used: boolean;
-}
-
 interface VaultCredentialRecord {
   id: string;
   service_name: string;
@@ -50,8 +30,6 @@ interface VaultCredentialRecord {
  */
 class MemoryDbStore {
   users: Map<string, UserRecord> = new Map();
-  oidcClients: Map<string, OidcClientRecord> = new Map();
-  oidcAuthCodes: Map<string, OidcAuthCodeRecord> = new Map();
   vaultCredentials: Map<string, VaultCredentialRecord> = new Map();
 
   query(sql: string, params: any[] = []): { rows: any[]; rowCount: number } {
@@ -120,28 +98,33 @@ class MemoryDbStore {
       return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
     }
 
-    // 2f. SELECT ... FROM users WHERE email = $1
+    // 2f. SELECT ... FROM users WHERE LOWER(username) = LOWER($1)
+    if (/SELECT .* FROM users WHERE LOWER\(username\) = LOWER\(\$1\)/i.test(trimmed)) {
+      const username = (params[0] || '').toLowerCase();
+      const user = Array.from(this.users.values()).find(
+        (u) => u.username.toLowerCase() === username
+      );
+      return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
+    }
+
+    // 2g. SELECT ... FROM users WHERE email = $1
     if (/SELECT .* FROM users WHERE email = \$1/i.test(trimmed)) {
-      const email = params[0]?.toLowerCase();
+      const email = (params[0] || '').toLowerCase();
       const user = Array.from(this.users.values()).find(
         (u) => u.email.toLowerCase() === email
       );
       return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
     }
 
-    // 3. SELECT ... FROM users WHERE id = $1
-    if (/SELECT .* FROM users WHERE id = \$1(?:\s|$)/i.test(trimmed)) {
-      const id = params[0];
-      const user = this.users.get(id);
+    // 3. Find user by id: SELECT ... FROM users WHERE id = $1
+    if (/SELECT .* FROM users WHERE id = \$1/i.test(trimmed)) {
+      const user = this.users.get(params[0]);
       return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
     }
 
-    // 4. SELECT users (general)
+    // 4. List users
     if (/SELECT .* FROM users/i.test(trimmed) && !/WHERE/i.test(trimmed)) {
-      const all = Array.from(this.users.values()).sort(
-        (a, b) => b.created_at.getTime() - a.created_at.getTime()
-      );
-      return { rows: all.map((u) => ({ ...u })), rowCount: all.length };
+      return { rows: Array.from(this.users.values()), rowCount: this.users.size };
     }
 
     // 5. INSERT INTO users
@@ -170,33 +153,32 @@ class MemoryDbStore {
       return { rows: [{ ...user }], rowCount: 1 };
     }
 
-    // 5b. UPDATE users SET
-    if (/UPDATE users SET/i.test(trimmed)) {
-      if (/password_hash = \$1 WHERE/i.test(trimmed)) {
-        const newHash = params[0];
-        const target = params[1];
-        const user = Array.from(this.users.values()).find(
-          (u) => u.id === target || u.username.toLowerCase() === String(target).toLowerCase()
-        );
-        if (user) {
-          user.password_hash = newHash;
-          user.updated_at = new Date();
-          return { rows: [{ ...user }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      }
-
-      // General user update: [username, email, display_name, password_hash, id]
-      const targetId = params[params.length - 1];
-      const user = Array.from(this.users.values()).find(
-        (u) => u.id === targetId || u.username.toLowerCase() === String(targetId).toLowerCase()
-      );
+    // 5a. UPDATE users SET password_hash = $1
+    if (/UPDATE users SET password_hash = \$1 WHERE id = \$2/i.test(trimmed)) {
+      const user = this.users.get(params[1]);
       if (user) {
-        if (params.length >= 5) {
+        user.password_hash = params[0];
+        user.updated_at = new Date();
+        return { rows: [{ ...user }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+
+    // 5b. UPDATE users (general profile update)
+    if (/UPDATE users SET/i.test(trimmed)) {
+      let id = params[params.length - 1];
+      let user = this.users.get(id);
+      if (!user) {
+        user = Array.from(this.users.values()).find((u) => u.id === id);
+      }
+      if (user) {
+        if (/username = \$1/i.test(trimmed)) {
           user.username = params[0];
           user.email = params[1];
-          user.display_name = params[2] || params[0];
-          user.password_hash = params[3];
+          user.display_name = params[2];
+          if (/password_hash = \$4/i.test(trimmed)) {
+            user.password_hash = params[3];
+          }
         }
         user.updated_at = new Date();
         return { rows: [{ ...user }], rowCount: 1 };
@@ -217,100 +199,14 @@ class MemoryDbStore {
       return { rows: [], rowCount: 0 };
     }
 
-    // 6. OIDC Clients: SELECT ... FROM oidc_clients WHERE client_id = $1
-    if (/SELECT .* FROM oidc_clients WHERE client_id = \$1/i.test(trimmed) && !/OR/i.test(trimmed)) {
-      const clientId = params[0];
-      const client = Array.from(this.oidcClients.values()).find((c) => c.client_id === clientId);
-      return { rows: client ? [{ ...client }] : [], rowCount: client ? 1 : 0 };
-    }
-
-    // 6b. SELECT ... FROM oidc_clients WHERE id = $1 OR client_id = $1
-    if (/SELECT .* FROM oidc_clients WHERE (?:id = \$1 OR client_id = \$1|client_id = \$1 OR id = \$1)/i.test(trimmed)) {
-      const target = params[0];
-      const client = Array.from(this.oidcClients.values()).find(
-        (c) => c.id === target || c.client_id === target
-      );
-      return { rows: client ? [{ ...client }] : [], rowCount: client ? 1 : 0 };
-    }
-
-    // 7. OIDC Clients: SELECT ... FROM oidc_clients ORDER BY
-    if (/SELECT .* FROM oidc_clients/i.test(trimmed) && !/WHERE/i.test(trimmed)) {
-      const all = Array.from(this.oidcClients.values()).sort(
-        (a, b) => b.created_at.getTime() - a.created_at.getTime()
-      );
-      return { rows: all.map((c) => ({ ...c })), rowCount: all.length };
-    }
-
-    // 8. OIDC Clients: INSERT INTO oidc_clients
-    if (/INSERT INTO oidc_clients/i.test(trimmed)) {
-      const id = crypto.randomUUID();
-      const client: OidcClientRecord = {
-        id,
-        client_id: params[0],
-        client_secret_hash: params[1],
-        client_name: params[2],
-        redirect_uris: Array.isArray(params[3]) ? params[3] : [params[3]],
-        scopes: Array.isArray(params[4]) ? params[4] : ['openid', 'profile', 'email'],
-        created_at: new Date(),
-      };
-      this.oidcClients.set(id, client);
-      return { rows: [{ ...client }], rowCount: 1 };
-    }
-
-    // 9. OIDC Clients: DELETE FROM oidc_clients WHERE id = $1 OR client_id = $1
-    if (/DELETE FROM oidc_clients/i.test(trimmed)) {
-      const target = params[0];
-      const client = Array.from(this.oidcClients.values()).find(
-        (c) => c.id === target || c.client_id === target
-      );
-      if (client) {
-        this.oidcClients.delete(client.id);
-        return { rows: [{ ...client }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    }
-
-    // 10. OIDC Auth Codes: INSERT INTO oidc_auth_codes
-    if (/INSERT INTO oidc_auth_codes/i.test(trimmed)) {
-      const codeRecord: OidcAuthCodeRecord = {
-        code: params[0],
-        client_id: params[1],
-        user_id: params[2],
-        redirect_uri: params[3],
-        scope: params[4],
-        expires_at: new Date(params[5]),
-        used: false,
-      };
-      this.oidcAuthCodes.set(codeRecord.code, codeRecord);
-      return { rows: [{ ...codeRecord }], rowCount: 1 };
-    }
-
-    // 11. OIDC Auth Codes: SELECT ... FROM oidc_auth_codes WHERE code = $1
-    if (/SELECT .* FROM oidc_auth_codes WHERE code = \$1/i.test(trimmed)) {
-      const code = params[0];
-      const rec = this.oidcAuthCodes.get(code);
-      return { rows: rec ? [{ ...rec }] : [], rowCount: rec ? 1 : 0 };
-    }
-
-    // 12. OIDC Auth Codes: UPDATE oidc_auth_codes SET used = TRUE
-    if (/UPDATE oidc_auth_codes SET used = TRUE/i.test(trimmed)) {
-      const code = params[0];
-      const rec = this.oidcAuthCodes.get(code);
-      if (rec) {
-        rec.used = true;
-        return { rows: [{ ...rec }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    }
-
-    // 13. Vault: SELECT ... FROM vault_credentials WHERE id = $1 (without OR)
+    // 6. Vault: SELECT ... FROM vault_credentials WHERE id = $1 (without OR)
     if (/SELECT .* FROM vault_credentials WHERE id = \$1(?:\s|$)/i.test(trimmed) && !/OR/i.test(trimmed)) {
       const id = params[0];
       const rec = this.vaultCredentials.get(id);
       return { rows: rec ? [{ ...rec }] : [], rowCount: rec ? 1 : 0 };
     }
 
-    // 13a. Vault: SELECT ... FROM vault_credentials WHERE LOWER(service_name) = LOWER($1)
+    // 6a. Vault: SELECT ... FROM vault_credentials WHERE LOWER(service_name) = LOWER($1)
     if (/SELECT .* FROM vault_credentials WHERE LOWER\(service_name\) = LOWER\(\$1\)/i.test(trimmed)) {
       const target = (params[0] || '').toLowerCase();
       const rec = Array.from(this.vaultCredentials.values()).find(
@@ -319,7 +215,7 @@ class MemoryDbStore {
       return { rows: rec ? [{ ...rec }] : [], rowCount: rec ? 1 : 0 };
     }
 
-    // 13a2. Vault: SELECT ... FROM vault_credentials WHERE LOWER(service_name) LIKE LOWER($1)
+    // 6b. Vault: SELECT ... FROM vault_credentials WHERE LOWER(service_name) LIKE LOWER($1)
     if (/SELECT .* FROM vault_credentials WHERE LOWER\(service_name\) LIKE LOWER\(\$1\)/i.test(trimmed)) {
       const raw = (params[0] || '').replace(/%/g, '').toLowerCase();
       const matches = Array.from(this.vaultCredentials.values()).filter(
@@ -328,7 +224,7 @@ class MemoryDbStore {
       return { rows: matches.map((m) => ({ ...m })), rowCount: matches.length };
     }
 
-    // 13b. Vault: SELECT ... FROM vault_credentials WHERE id = $1 OR service_name = $1
+    // 6c. Vault: SELECT ... FROM vault_credentials WHERE id = $1 OR service_name = $1
     if (/SELECT .* FROM vault_credentials WHERE (?:id = \$1 OR service_name = \$1|service_name = \$1 OR id = \$1)/i.test(trimmed)) {
       const target = params[0]?.toLowerCase();
       const rec = Array.from(this.vaultCredentials.values()).find(
@@ -337,15 +233,35 @@ class MemoryDbStore {
       return { rows: rec ? [{ ...rec }] : [], rowCount: rec ? 1 : 0 };
     }
 
-    // 14. Vault: SELECT ... FROM vault_credentials (without WHERE)
-    if (/SELECT .* FROM vault_credentials/i.test(trimmed) && !/WHERE/i.test(trimmed)) {
-      let all = Array.from(this.vaultCredentials.values()).sort(
-        (a, b) => b.updated_at.getTime() - a.updated_at.getTime()
-      );
-      return { rows: all.map((c) => ({ ...c })), rowCount: all.length };
+    // 7. Vault: COUNT vault_credentials
+    if (/SELECT COUNT\(\*\) FROM vault_credentials/i.test(trimmed)) {
+      return { rows: [{ count: this.vaultCredentials.size.toString() }], rowCount: 1 };
     }
 
-    // 15. Vault: INSERT INTO vault_credentials
+    // 8. Vault: SELECT ... FROM vault_credentials (list or filter)
+    if (/SELECT .* FROM vault_credentials/i.test(trimmed)) {
+      let items = Array.from(this.vaultCredentials.values());
+
+      if (params.length > 0 && params[0]) {
+        const queryTerm = params[0].toString().replace(/%/g, '').toLowerCase();
+        items = items.filter(
+          (i) =>
+            i.service_name.toLowerCase().includes(queryTerm) ||
+            i.username.toLowerCase().includes(queryTerm) ||
+            i.category.toLowerCase().includes(queryTerm)
+        );
+      }
+
+      if (params.length > 1 && params[1]) {
+        const cat = params[1].toString().toLowerCase();
+        items = items.filter((i) => i.category.toLowerCase() === cat);
+      }
+
+      items.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+      return { rows: items.map((i) => ({ ...i })), rowCount: items.length };
+    }
+
+    // 9. Vault: INSERT INTO vault_credentials
     if (/INSERT INTO vault_credentials/i.test(trimmed)) {
       const id = crypto.randomUUID();
       const rec: VaultCredentialRecord = {
@@ -353,7 +269,7 @@ class MemoryDbStore {
         service_name: params[0],
         category: params[1] || 'General',
         service_url: params[2] || '',
-        username: params[3] || '',
+        username: params[3],
         encrypted_password: params[4],
         encrypted_notes: params[5] || '',
         created_at: new Date(),
@@ -363,38 +279,36 @@ class MemoryDbStore {
       return { rows: [{ ...rec }], rowCount: 1 };
     }
 
-    // 16. Vault: UPDATE vault_credentials SET
+    // 10. Vault: UPDATE vault_credentials
     if (/UPDATE vault_credentials SET/i.test(trimmed)) {
-      const id = params[6];
-      const existing = Array.from(this.vaultCredentials.values()).find(
-        (v) => v.id === id || v.service_name.toLowerCase() === id.toLowerCase()
-      );
-      if (existing) {
-        existing.service_name = params[0];
-        existing.category = params[1];
-        existing.service_url = params[2];
-        existing.username = params[3];
-        existing.encrypted_password = params[4];
-        existing.encrypted_notes = params[5];
-        existing.updated_at = new Date();
-        return { rows: [{ ...existing }], rowCount: 1 };
+      const id = params[params.length - 1];
+      const rec = this.vaultCredentials.get(id);
+      if (rec) {
+        rec.service_name = params[0];
+        rec.category = params[1] || 'General';
+        rec.service_url = params[2] || '';
+        rec.username = params[3];
+        rec.encrypted_password = params[4];
+        rec.encrypted_notes = params[5] || '';
+        rec.updated_at = new Date();
+        return { rows: [{ ...rec }], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     }
 
-    // 17. Vault: DELETE FROM vault_credentials WHERE id = $1 (or service_name = $1)
-    if (/DELETE FROM vault_credentials/i.test(trimmed)) {
+    // 11. Vault: DELETE FROM vault_credentials
+    if (/DELETE FROM vault_credentials WHERE id = \$1/i.test(trimmed)) {
       const id = params[0];
-      const existing = Array.from(this.vaultCredentials.values()).find(
-        (v) => v.id === id || v.service_name.toLowerCase() === id.toLowerCase()
-      );
-      if (existing) {
-        this.vaultCredentials.delete(existing.id);
-        return { rows: [{ ...existing }], rowCount: 1 };
-      }
+      const deleted = this.vaultCredentials.delete(id);
+      return { rows: deleted ? [{ id }] : [], rowCount: deleted ? 1 : 0 };
+    }
+
+    // DDL commands (CREATE, DROP, ALTER)
+    if (/CREATE|ALTER|DROP/i.test(trimmed)) {
       return { rows: [], rowCount: 0 };
     }
 
+    console.warn(`[MemoryDB] Unhandled SQL query in fallback: ${trimmed}`);
     return { rows: [], rowCount: 0 };
   }
 }

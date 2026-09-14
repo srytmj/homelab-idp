@@ -1,11 +1,10 @@
 import React from 'react';
-import { Lock, Plus, Key, Network, LogOut, Settings } from 'lucide-react';
+import { Lock, Plus, Network, LogOut, Settings } from 'lucide-react';
 import { User } from '../api/client';
 
 interface NavbarProps {
   user: User | null;
   onOpenNewModal: () => void;
-  onOpenOidcModal: () => void;
   onOpenGuideModal: () => void;
   onOpenSettingsModal: () => void;
   onLogout: () => void;
@@ -14,7 +13,6 @@ interface NavbarProps {
 export const Navbar: React.FC<NavbarProps> = ({
   user,
   onOpenNewModal,
-  onOpenOidcModal,
   onOpenGuideModal,
   onOpenSettingsModal,
   onLogout,
@@ -39,24 +37,14 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Action Controls */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Quick Setup Guide */}
+          {/* Quick Setup Guide for Nginx Forward Auth */}
           <button
             onClick={onOpenGuideModal}
             className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 text-xs font-mono transition-colors"
-            title="Nginx Proxy Manager Setup Snippet"
+            title="Nginx Forward Auth Setup Guide"
           >
             <Network className="w-3.5 h-3.5" />
             <span>Forward Auth</span>
-          </button>
-
-          {/* OIDC Clients */}
-          <button
-            onClick={onOpenOidcModal}
-            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 text-xs font-mono transition-colors"
-            title="OIDC Registered Clients"
-          >
-            <Key className="w-3.5 h-3.5" />
-            <span>OIDC Clients</span>
           </button>
 
           {/* New Credential */}

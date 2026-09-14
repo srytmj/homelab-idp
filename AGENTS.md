@@ -8,15 +8,17 @@ This document provides machine-actionable specifications, architectural contract
 
 ### System Model and Architecture
 
-`homelab-idp` functions as a unified identity boundary and secret manager for homelab infrastructure:
+`homelab-idp` functions with strictly two core roles:
 
-1. **OIDC/OAuth2 Authorization Server**:
-   - Implements RFC 6749 (OAuth 2.0) and OpenID Connect Core 1.0 (Authorization Code Flow).
-   - Issues RS256-signed identity tokens using RSA 2048-bit keypairs generated at startup.
-   - Exposes standard JWKS key sets at `/.well-known/jwks.json`.
-   - Exposes OpenID Provider Metadata at `/.well-known/openid-configuration`.
+1. **Password Bank (Encrypted Credential Vault)**:
+   - Stores homelab service credentials with authenticated AES-256-GCM symmetric encryption.
+   - Encryption key derived from `VAULT_SECRET_KEY` (32 bytes).
+   - Storage format: `<iv_hex>:<auth_tag_hex>:<ciphertext_hex>`.
+   - Each secret has an isolated 12-byte cryptographically secure random IV (`crypto.randomBytes(12)`).
+   - User account passwords are saved using Argon2id (`memoryCost: 64MB`, `timeCost: 3`, `parallelism: 4`).
+   - Supports editing Password, Service URL, Category, and Notes via both UI and CLI.
 
-2. **Forward Authentication Proxy Interceptor**:
+2. **Nginx Forward Authentication Proxy Gate (SSO Gateway)**:
    - Serves high-speed HTTP verification subrequests at `GET /api/auth/verify`.
    - Ingests incoming cookies (`homelab_session`) or Bearer tokens (`Authorization: Bearer <jwt>`).
    - On success: Emits HTTP 200 with downstream identity headers:
@@ -26,17 +28,14 @@ This document provides machine-actionable specifications, architectural contract
      - `Remote-Groups`: Account role (`admin`, `member`)
    - On failure: Emits HTTP 401 Unauthorized without body.
 
-3. **Encrypted Credential Vault**:
-   - Stores homelab service credentials with authenticated AES-256-GCM symmetric encryption.
-   - Encryption key derived from `VAULT_SECRET_KEY` (32 bytes).
-   - Storage format: `<iv_hex>:<auth_tag_hex>:<ciphertext_hex>`.
-   - Each secret has an isolated 12-byte cryptographically secure random IV (`crypto.randomBytes(12)`).
-   - Passwords for user logins are hashed with Argon2id (`memoryCost: 64MB`, `timeCost: 3`, `parallelism: 4`).
+3. **Production Fail-Fast Database**:
+   - In production (`NODE_ENV=production`), PostgreSQL connection failure causes immediate exit (`process.exit(1)`).
+   - In-memory database simulation is strictly restricted to development/test runs.
 
 4. **Command-Line Interface (CLI)**:
    - Programmatic CLI tool available at `/usr/local/bin/homelab-idp` (inside container) or `./bin/homelab-idp` (host).
    - All subcommands support `--json` (or `-j`) for strict machine readability.
-   - Zero browser interaction required for agent lifecycle operations.
+   - Automatically maps service names to UUIDs on `vault update`, `vault get`, and `vault delete`.
 
 ---
 
@@ -47,18 +46,12 @@ All JSON endpoints accept and return `application/json`. Sessions use `homelab_s
 | Endpoint | Method | Purpose | Authentication |
 |---|---|---|---|
 | `/api/health` | `GET` | Container / service readiness probe | None |
-| `/.well-known/openid-configuration` | `GET` | RFC 8414 OAuth 2.0 / OIDC Discovery | None |
-| `/.well-known/jwks.json` | `GET` | RFC 7517 Public Key Keyset | None |
 | `/api/auth/register` | `POST` | Programmatic SSO user registration | None |
 | `/api/auth/login` | `POST` | Authenticate username + password | None (Rate limited: 10/min) |
 | `/api/auth/logout` | `POST` | Invalidate cookie session | Session / Bearer |
 | `/api/auth/me` | `GET` | Inspect current user identity | Session / Bearer |
+| `/api/auth/profile` | `PUT` | Update username, email, display name, password | Session / Bearer |
 | `/api/auth/verify` | `GET` | Forward Auth subrequest gate | Session / Bearer |
-| `/api/oauth/authorize` | `GET` / `POST` | Authorization Code initiation & consent | Session / Bearer |
-| `/api/oauth/token` | `POST` | Exchange auth code for ID & access tokens | Basic Auth / Form body |
-| `/api/oauth/userinfo` | `GET` | Return OpenID user claims | Bearer Access Token |
-| `/api/oidc/clients` | `GET` / `POST` | OIDC Client Registry management | Admin role required |
-| `/api/oidc/clients/:id` | `DELETE` | Revoke OIDC client registration | Admin role required |
 | `/api/vault` | `GET` / `POST` | Credential listing & creation | Session / Bearer |
 | `/api/vault/:id` | `PUT` / `DELETE` | Credential update & deletion | Session / Bearer |
 
@@ -76,14 +69,11 @@ homelab-idp token generate --username admin --hours 24 --json
 Output:
 ```json
 {
-  "success": true,
   "token": "<signed_bearer_token>",
   "expires_in_hours": 24,
   "user": {
     "id": "uuid",
-    "username": "admin",
-    "email": "admin@homelab.local",
-    "role": "admin"
+    "username": "admin"
   }
 }
 ```
@@ -99,30 +89,7 @@ homelab-idp user add \
   --json
 ```
 
-#### 3. Register an OIDC Client Application
-```bash
-homelab-idp oidc register \
-  --name "Nextcloud Storage" \
-  --redirect-uri "https://cloud.homelab.local/apps/user_oidc/code" \
-  --json
-```
-Output:
-```json
-{
-  "success": true,
-  "client": {
-    "id": "uuid",
-    "client_id": "nextcloud-storage-a1b2c3",
-    "client_name": "Nextcloud Storage",
-    "redirect_uris": ["https://cloud.homelab.local/apps/user_oidc/code"],
-    "scopes": ["openid", "profile", "email"],
-    "created_at": "2026-09-14T12:00:00.000Z"
-  },
-  "client_secret": "32_byte_hex_secret"
-}
-```
-
-#### 4. Save and Query Encrypted Vault Credentials
+#### 3. Save, Query, and Update Encrypted Vault Credentials
 ```bash
 # Add secret
 homelab-idp vault add \
@@ -136,11 +103,17 @@ homelab-idp vault add \
 # Query secrets with decrypted passwords
 homelab-idp vault list --query "postgres" --reveal --json
 
-# Inspect single secret
+# Inspect single secret by service name
 homelab-idp vault get "PostgreSQL Master" --reveal --json
+
+# Update password directly by service name (no UUID required)
+homelab-idp vault update "PostgreSQL Master" --password "NewSecureDbPass2026!" --json
+
+# Delete secret by service name
+homelab-idp vault delete "PostgreSQL Master" --json
 ```
 
-#### 5. Verify Forward Authentication
+#### 4. Verify Forward Authentication
 ```bash
 homelab-idp forward-auth test --token "<jwt_token>" --json
 ```
@@ -151,7 +124,7 @@ Output:
   "message": "Authorized",
   "headers": {
     "Remote-User": "admin",
-    "Remote-Email": "admin@suryatmaja.dev",
+    "Remote-Email": "admin@homelab.local",
     "Remote-Name": "Homelab Administrator",
     "Remote-Groups": "admin"
   }
@@ -170,8 +143,7 @@ curl -s -X POST http://localhost:4000/api/auth/register \
     "username": "new_operator",
     "email": "operator@homelab.local",
     "password": "StrongPassword2026!",
-    "displayName": "Operator One",
-    "role": "member"
+    "displayName": "Operator One"
   }'
 ```
 
@@ -194,4 +166,4 @@ curl -s -H "Authorization: Bearer <jwt_token>" "http://localhost:4000/api/vault?
 1. **HTTP 401 Unauthorized**: Session expired or invalid credentials. Call `/api/auth/login` or `homelab-idp token generate` to renew session.
 2. **HTTP 409 Conflict**: Returned by `POST /api/auth/register` when the requested `username` or `email` already exists.
 3. **HTTP 429 Too Many Requests**: Rate limiting active on login and register endpoints (10 requests per minute per IP). Apply exponential backoff.
-4. **Database Mode**: If PostgreSQL is unreachable at boot, the server logs a warning and engages an in-memory fallback adapter (`memoryFallback.ts`). All routes and cryptographic behaviors remain operational in ephemeral mode.
+4. **Database Mode**: If PostgreSQL is unreachable in production (`NODE_ENV=production`), the application terminates (`exit 1`) to avoid data confusion. In development/test, it falls back to ephemeral memory store.

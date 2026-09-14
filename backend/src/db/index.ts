@@ -1,68 +1,54 @@
 import pg from 'pg';
 import { config } from '../config/env.js';
-import { hashPassword } from '../crypto/hash.js';
 import { memoryDb } from './memoryFallback.js';
+import { hashPassword } from '../crypto/hash.js';
 import { encryptAesGcm } from '../crypto/aes.js';
 
 const { Pool } = pg;
 
-let pool: pg.Pool | null = null;
-let isUsingMemoryDb = false;
+export let pool: pg.Pool | null = null;
+export let isUsingMemoryDb = false;
 
-export function getIsUsingMemoryDb(): boolean {
-  return isUsingMemoryDb;
-}
-
-/**
- * Executes a SQL query against PostgreSQL or the in-memory fallback.
- */
 export async function query(sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount: number }> {
-  if (isUsingMemoryDb || !pool) {
-    return memoryDb.query(sql, params);
+  if (!isUsingMemoryDb && pool) {
+    try {
+      const res = await pool.query(sql, params);
+      return { rows: res.rows, rowCount: res.rowCount || 0 };
+    } catch (err: any) {
+      console.error('[Database Error]', err.message);
+      throw err;
+    }
   }
 
-  try {
-    const res = await pool.query(sql, params);
-    return {
-      rows: res.rows,
-      rowCount: res.rowCount ?? res.rows.length,
-    };
-  } catch (err: any) {
-    // If connection dropped, handle error or fallback
-    console.error('Database query error:', err.message);
-    throw err;
-  }
+  return memoryDb.query(sql, params);
 }
 
-/**
- * Close database pool connection.
- */
-export async function closeDb(): Promise<void> {
-  if (pool) {
-    await pool.end();
-    pool = null;
-  }
-}
-
-/**
- * Initialize database connection, run DDL migrations, and seed initial admin user.
- */
 export async function initDb(quiet = false): Promise<void> {
-  if (!quiet) {
-    console.log(`[Database] Connecting to database: ${config.databaseUrl.replace(/:[^:@]+@/, ':****@')}...`);
+  // If explicitly configured for in-memory or running headless
+  if (config.databaseUrl.startsWith('memory://') || process.env.USE_MEMORY_DB === 'true') {
+    if (!quiet) console.log('[Database] Using in-memory database store.');
+    isUsingMemoryDb = true;
+    await runMigrations(quiet);
+    await seedInitialAdmin(quiet);
+    await seedDefaultVault();
+    return;
   }
 
   try {
-    const testPool = new Pool({
+    const maskedUrl = config.databaseUrl.replace(/:[^:@]+@/, ':****@');
+    if (!quiet) console.log(`[Database] Connecting to database: ${maskedUrl}...`);
+
+    pool = new Pool({
       connectionString: config.databaseUrl,
-      connectionTimeoutMillis: 3000,
-      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 4000,
+      idleTimeoutMillis: 30000,
+      max: 20,
     });
 
-    // Test connection with a quick timeout
-    const client = await testPool.connect();
+    // Test connection
+    const client = await pool.connect();
     client.release();
-    pool = testPool;
+
     isUsingMemoryDb = false;
     if (!quiet) {
       console.log('[Database] Successfully connected to PostgreSQL.');
@@ -96,9 +82,6 @@ export async function initDb(quiet = false): Promise<void> {
   // Seed initial admin user if empty
   await seedInitialAdmin(quiet);
 
-  // Seed default OIDC clients (e.g. Komga, Nextcloud) for convenience
-  await seedDefaultClients();
-
   // Seed initial sample vault credentials if empty
   await seedDefaultVault();
 }
@@ -108,6 +91,11 @@ async function runMigrations(quiet = false): Promise<void> {
     CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
     CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+    -- Drop legacy OIDC tables if present
+    DROP TABLE IF EXISTS oidc_auth_codes CASCADE;
+    DROP TABLE IF EXISTS oidc_clients CASCADE;
+
+    -- 1. Users table (SSO accounts & Forward Auth)
     CREATE TABLE IF NOT EXISTS users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       username VARCHAR(64) UNIQUE NOT NULL,
@@ -120,26 +108,7 @@ async function runMigrations(quiet = false): Promise<void> {
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS oidc_clients (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      client_id VARCHAR(64) UNIQUE NOT NULL,
-      client_secret_hash TEXT NOT NULL,
-      client_name VARCHAR(128) NOT NULL,
-      redirect_uris TEXT[] NOT NULL,
-      scopes TEXT[] DEFAULT ARRAY['openid', 'profile', 'email'],
-      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS oidc_auth_codes (
-      code VARCHAR(128) PRIMARY KEY,
-      client_id VARCHAR(64) REFERENCES oidc_clients(client_id) ON DELETE CASCADE,
-      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-      redirect_uri TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-      used BOOLEAN DEFAULT FALSE
-    );
-
+    -- 2. Credential Vault table (Password Bank)
     CREATE TABLE IF NOT EXISTS vault_credentials (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       service_name VARCHAR(128) NOT NULL,
@@ -184,32 +153,6 @@ async function seedInitialAdmin(quiet = false): Promise<void> {
   }
 }
 
-async function seedDefaultClients(): Promise<void> {
-  const countRes = await query('SELECT COUNT(*) FROM oidc_clients');
-  const count = parseInt(countRes.rows[0]?.count || '0', 10);
-
-  if (count === 0) {
-    const defaultSecret = 'komga_homelab_secret_2026';
-    const secretHash = await hashPassword(defaultSecret);
-    await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (client_id) DO NOTHING`,
-      [
-        'komga-oidc',
-        secretHash,
-        'Komga Comic & Manga Server',
-        [
-          'https://komga.homelab.local/oauth2/code/homelab',
-          'http://localhost:8080/oauth2/code/homelab',
-          'http://localhost:8080/login/oauth2/code/homelab-idp',
-        ],
-        ['openid', 'profile', 'email'],
-      ]
-    );
-  }
-}
-
 async function seedDefaultVault(): Promise<void> {
   const countRes = await query('SELECT COUNT(*) FROM vault_credentials');
   const count = parseInt(countRes.rows[0]?.count || '0', 10);
@@ -251,5 +194,12 @@ async function seedDefaultVault(): Promise<void> {
         [s.service_name, s.category, s.service_url, s.username, encPass, encNotes]
       );
     }
+  }
+}
+
+export async function closeDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }

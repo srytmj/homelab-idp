@@ -10,17 +10,13 @@ import {
   ExternalLink,
   Edit2,
   Trash2,
-  Lock,
   Plus,
   Server,
-  FileText,
-  KeyRound,
   Pencil,
 } from 'lucide-react';
 import { api, VaultItem, User } from '../api/client';
 import { VaultModal } from '../components/VaultModal';
 import { EditVaultModal } from '../components/EditVaultModal';
-import { OidcModal } from '../components/OidcModal';
 import { ForwardAuthGuideModal } from '../components/ForwardAuthGuideModal';
 
 interface VaultDashboardProps {
@@ -28,8 +24,6 @@ interface VaultDashboardProps {
   onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   isNewModalOpen: boolean;
   setIsNewModalOpen: (open: boolean) => void;
-  isOidcModalOpen: boolean;
-  setIsOidcModalOpen: (open: boolean) => void;
   isGuideModalOpen: boolean;
   setIsGuideModalOpen: (open: boolean) => void;
 }
@@ -37,12 +31,10 @@ interface VaultDashboardProps {
 const CATEGORIES = ['All', 'Media', 'Storage', 'System', 'Network', 'Infrastructure', 'General'];
 
 export const VaultDashboard: React.FC<VaultDashboardProps> = ({
-  user,
+  user: _user,
   onShowToast,
   isNewModalOpen,
   setIsNewModalOpen,
-  isOidcModalOpen,
-  setIsOidcModalOpen,
   isGuideModalOpen,
   setIsGuideModalOpen,
 }) => {
@@ -177,7 +169,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
             <span className="text-white font-semibold">{items.length}</span>
           </div>
           <div className="px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-400">
-            <span>SSO: </span>
+            <span>FORWARD AUTH: </span>
             <span className="text-white font-semibold">ACTIVE</span>
           </div>
         </div>
@@ -261,7 +253,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
               }`}
             >
               <span>{cat}</span>
-              <span className={`text-[10px] ${isSelected ? 'text-zinc-600 font-bold' : 'text-zinc-500'}`}>\
+              <span className={`text-[10px] ${isSelected ? 'text-zinc-600 font-bold' : 'text-zinc-500'}`}>
                 {count}
               </span>
             </button>
@@ -502,8 +494,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
                             <Pencil className="w-2.5 h-2.5" />
                           </button>
                         </div>
-                        {item.service_url && (
-                          <a
+                        {item.service_url && (                          <a
                             href={item.service_url.startsWith('http') ? item.service_url : `http://${item.service_url}`}
                             target="_blank"
                             rel="noreferrer"
@@ -641,12 +632,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
         onSave={handleSaveCredential}
       />
 
-      <OidcModal
-        isOpen={isOidcModalOpen}
-        onClose={() => setIsOidcModalOpen(false)}
-        onShowToast={onShowToast}
-      />
-
+      {/* Forward Auth Guide Modal */}
       <ForwardAuthGuideModal
         isOpen={isGuideModalOpen}
         onClose={() => setIsGuideModalOpen(false)}

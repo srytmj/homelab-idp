@@ -19,15 +19,6 @@ export interface VaultItem {
   updated_at: string;
 }
 
-export interface OidcClient {
-  id: string;
-  client_id: string;
-  client_name: string;
-  redirect_uris: string[];
-  scopes: string[];
-  created_at: string;
-}
-
 const API_BASE = '';
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -55,7 +46,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 }
 
 export const api = {
-  // Auth
+  // Auth & SSO Profile
   async getMe(): Promise<{ user: User }> {
     return request<{ user: User }>('/api/auth/me');
   },
@@ -86,7 +77,7 @@ export const api = {
     });
   },
 
-  // Vault
+  // Credential Vault (Password Bank)
   async getVaultItems(q?: string, category?: string): Promise<{ credentials: VaultItem[] }> {
     const params = new URLSearchParams();
     if (q) params.set('q', q);
@@ -129,43 +120,6 @@ export const api = {
   async deleteVaultItem(id: string): Promise<{ success: boolean }> {
     return request<{ success: boolean }>(`/api/vault/${id}`, {
       method: 'DELETE',
-    });
-  },
-
-  // OIDC Clients
-  async getOidcClients(): Promise<{ clients: OidcClient[] }> {
-    return request<{ clients: OidcClient[] }>('/api/oidc/clients');
-  },
-
-  async createOidcClient(data: {
-    client_name: string;
-    client_id?: string;
-    redirect_uris: string[];
-    scopes?: string[];
-  }): Promise<{ client: OidcClient; client_secret: string }> {
-    return request('/api/oidc/clients', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
-
-  async deleteOidcClient(id: string): Promise<{ success: boolean }> {
-    return request(`/api/oidc/clients/${id}`, {
-      method: 'DELETE',
-    });
-  },
-
-  // OIDC Consent Decision
-  async submitConsent(data: {
-    client_id: string;
-    redirect_uri: string;
-    scope?: string;
-    state?: string;
-    action: 'allow' | 'deny';
-  }): Promise<{ success?: boolean; redirect_url: string }> {
-    return request('/api/oauth/authorize', {
-      method: 'POST',
-      body: JSON.stringify(data),
     });
   },
 };

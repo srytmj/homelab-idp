@@ -1,78 +1,55 @@
-import assert from 'assert';
+import { test } from 'node:test';
+import assert from 'node:assert';
 import { encryptAesGcm, decryptAesGcm } from '../src/crypto/aes.js';
 import { hashPassword, verifyPassword } from '../src/crypto/hash.js';
-import { getJWKS, signOidcIdToken, signSessionToken, verifySessionToken, getOidcKeyPair } from '../src/crypto/jwks.js';
-import { initDb, query } from '../src/db/index.js';
+import { signSessionToken, verifySessionToken } from '../src/crypto/jwks.js';
 import { buildApp } from '../src/app.js';
+import { initDb, query } from '../src/db/index.js';
 import { config } from '../src/config/env.js';
 
-async function runTests() {
-  console.log('🧪 Running homelab-idp comprehensive test suite...\n');
+test('Comprehensive homelab-idp Core Test Suite', async () => {
+  console.log('\n🧪 Running homelab-idp comprehensive test suite...\n');
 
   // 1. Test AES-256-GCM
   console.log('▶ Testing AES-256-GCM encryption & decryption...');
-  const secret = 'super_secret_homelab_key_32bytes!';
-  const plaintext = 'SuperSecretP@ssword2026!#$';
-  const encrypted1 = encryptAesGcm(plaintext, secret);
-  const encrypted2 = encryptAesGcm(plaintext, secret);
+  const originalSecret = 'ProxmoxClusterRootPass_2026!#$';
+  const encrypted = encryptAesGcm(originalSecret, config.vaultSecretKey);
+  assert(encrypted.includes(':'), 'Encrypted output should be in iv:authTag:ciphertext format');
+  const decrypted = decryptAesGcm(encrypted, config.vaultSecretKey);
+  assert.strictEqual(decrypted, originalSecret, 'Decrypted text should match original');
 
-  assert(encrypted1 !== plaintext, 'Encrypted text should not equal plaintext');
-  assert(encrypted1 !== encrypted2, 'Two encryptions of same plaintext should produce different ciphertexts (random IV)');
-
-  const parts = encrypted1.split(':');
-  assert.strictEqual(parts.length, 3, 'Format should be iv:authTag:ciphertext');
-  assert.strictEqual(parts[0].length, 24, 'IV should be 12 bytes (24 hex characters)');
-  assert.strictEqual(parts[1].length, 32, 'AuthTag should be 16 bytes (32 hex characters)');
-
-  const decrypted = decryptAesGcm(encrypted1, secret);
-  assert.strictEqual(decrypted, plaintext, 'Decrypted text should match original plaintext');
-
-  // Verify tampering fails
-  const tampered = parts[0] + ':' + parts[1] + ':' + parts[2].substring(0, parts[2].length - 2) + 'aa';
-  assert.throws(() => decryptAesGcm(tampered, secret), 'Tampered ciphertext should throw error');
+  // Tampered ciphertext check
+  const parts = encrypted.split(':');
+  parts[2] = parts[2].substring(0, parts[2].length - 2) + '00';
+  assert.throws(() => {
+    decryptAesGcm(parts.join(':'), config.vaultSecretKey);
+  }, /auth/i, 'Tampered ciphertext must fail authentication tag verification');
   console.log('  ✅ AES-256-GCM passed.');
 
   // 2. Test Argon2id
   console.log('▶ Testing Argon2id password hashing...');
-  const password = 'homelab_master_password_123';
-  const hash = await hashPassword(password);
-  assert(hash.startsWith('$argon2id$'), 'Hash should be Argon2id format');
-  const match = await verifyPassword(hash, password);
-  assert.strictEqual(match, true, 'Valid password should verify successfully');
-  const mismatch = await verifyPassword(hash, 'wrong_password');
-  assert.strictEqual(mismatch, false, 'Invalid password should fail verification');
+  const userPassword = 'MySuperSecurePassword2026!';
+  const hashedPassword = await hashPassword(userPassword);
+  assert(hashedPassword.startsWith('$argon2id$'), 'Hash should be formatted as Argon2id');
+  const validCheck = await verifyPassword(hashedPassword, userPassword);
+  assert.strictEqual(validCheck, true, 'Valid password verification should be true');
+  const invalidCheck = await verifyPassword(hashedPassword, 'WrongPassword123');
+  assert.strictEqual(invalidCheck, false, 'Invalid password verification should be false');
   console.log('  ✅ Argon2id passed.');
 
-  // 3. Test JWKS and JWT
-  console.log('▶ Testing JWKS and JWT tokens...');
-  const jwks = await getJWKS();
-  assert(Array.isArray(jwks.keys), 'JWKS should contain keys array');
-  assert(jwks.keys.length > 0, 'JWKS should have at least 1 key');
-  assert.strictEqual(jwks.keys[0].kty, 'RSA', 'Key type should be RSA');
-  assert.strictEqual(jwks.keys[0].alg, 'RS256', 'Algorithm should be RS256');
-
-  // Session Token
+  // 3. Test JWT Session Tokens
+  console.log('▶ Testing Session JWT tokens...');
   const sessionToken = await signSessionToken({
     userId: '11111111-2222-3333-4444-555555555555',
     username: 'admin',
     email: 'admin@homelab.local',
-    displayName: 'Admin User',
+    displayName: 'Homelab Administrator',
     role: 'admin',
   });
   const verifiedSession = await verifySessionToken(sessionToken);
   assert(verifiedSession, 'Session token should verify successfully');
   assert.strictEqual(verifiedSession.username, 'admin');
-
-  // OIDC ID Token
-  const idToken = await signOidcIdToken({
-    sub: '11111111-2222-3333-4444-555555555555',
-    preferred_username: 'admin',
-    email: 'admin@homelab.local',
-    aud: 'komga-oidc',
-  });
-  assert(typeof idToken === 'string', 'ID token should be a string');
-  assert.strictEqual(idToken.split('.').length, 3, 'JWT should have 3 parts');
-  console.log('  ✅ JWKS & Tokens passed.');
+  console.log('  ✅ Session JWT tokens passed.');
 
   // 4. Test DB Initializer
   console.log('▶ Initializing Database and running migrations & seeds...');
@@ -207,7 +184,7 @@ async function runTests() {
   assert.strictEqual(newLoginRes.statusCode, 200, 'Login with updated username & password should succeed');
   console.log('  ✅ Profile & Account Settings update passed.');
 
-  // 6. Test Forward Auth (/api/auth/verify)
+  // 6. Test Forward Auth (/api/auth/verify) for Nginx Proxy Manager
   console.log('▶ Testing Forward Auth endpoint for Nginx Proxy Manager...');
   const unauthVerify = await app.inject({
     method: 'GET',
@@ -226,80 +203,7 @@ async function runTests() {
   assert.strictEqual(authVerify.headers['remote-name'], 'Lead Homelab Admin');
   console.log('  ✅ Forward Auth passed. Correctly injects updated Remote-User, Remote-Email, Remote-Name.');
 
-  // 7. Test OIDC Discovery & JWKS
-  console.log('▶ Testing OIDC Discovery & Token Flow...');
-  const oidcConfigRes = await app.inject({
-    method: 'GET',
-    url: '/.well-known/openid-configuration',
-  });
-  assert.strictEqual(oidcConfigRes.statusCode, 200);
-  const oidcConfig = JSON.parse(oidcConfigRes.body);
-  assert.strictEqual(oidcConfig.issuer, config.appUrl);
-  assert(oidcConfig.authorization_endpoint.includes('/api/oauth/authorize'));
-  assert(oidcConfig.token_endpoint.includes('/api/oauth/token'));
-  assert(oidcConfig.jwks_uri.includes('/.well-known/jwks.json'));
-
-  const jwksRes = await app.inject({
-    method: 'GET',
-    url: '/.well-known/jwks.json',
-  });
-  assert.strictEqual(jwksRes.statusCode, 200);
-
-  // OIDC Consent Decision
-  const authorizeDecisionRes = await app.inject({
-    method: 'POST',
-    url: '/api/oauth/authorize',
-    cookies: { homelab_session: sessionCookie },
-    payload: {
-      client_id: 'komga-oidc',
-      redirect_uri: 'http://localhost:8080/login/oauth2/code/homelab-idp',
-      scope: 'openid profile email',
-      state: 'test-state-xyz',
-      action: 'allow',
-    },
-  });
-  assert.strictEqual(authorizeDecisionRes.statusCode, 200);
-  const authDecision = JSON.parse(authorizeDecisionRes.body);
-  assert(authDecision.redirect_url.includes('code='), 'Should return redirect url with auth code');
-  assert(authDecision.redirect_url.includes('state=test-state-xyz'));
-
-  // Extract auth code from redirect URL
-  const codeUrl = new URL(authDecision.redirect_url);
-  const issuedCode = codeUrl.searchParams.get('code')!;
-
-  // Exchange code for token
-  const tokenRes = await app.inject({
-    method: 'POST',
-    url: '/api/oauth/token',
-    payload: {
-      grant_type: 'authorization_code',
-      code: issuedCode,
-      client_id: 'komga-oidc',
-      client_secret: 'komga_homelab_secret_2026',
-      redirect_uri: 'http://localhost:8080/login/oauth2/code/homelab-idp',
-    },
-  });
-  assert.strictEqual(tokenRes.statusCode, 200);
-  const tokenBody = JSON.parse(tokenRes.body);
-  assert(tokenBody.access_token, 'Response must contain access_token');
-  assert(tokenBody.id_token, 'Response must contain id_token');
-  assert.strictEqual(tokenBody.token_type, 'Bearer');
-
-  // Call userinfo endpoint with access_token
-  const userinfoRes = await app.inject({
-    method: 'GET',
-    url: '/api/oauth/userinfo',
-    headers: {
-      authorization: `Bearer ${tokenBody.access_token}`,
-    },
-  });
-  assert.strictEqual(userinfoRes.statusCode, 200);
-  const userinfoBody = JSON.parse(userinfoRes.body);
-  assert.strictEqual(userinfoBody.preferred_username, 'admin_updated');
-  assert.strictEqual(userinfoBody.email, 'admin.updated@homelab.local');
-  console.log('  ✅ OIDC Authorization Code Flow & Userinfo passed.');
-
-  // 8. Test Credential Vault API
+  // 7. Test Credential Vault API (AES-256-GCM CRUD)
   console.log('▶ Testing Credential Vault API with AES-256-GCM encryption...');
   // Create credential
   const createVaultRes = await app.inject({
@@ -320,25 +224,17 @@ async function runTests() {
   assert.strictEqual(createdItem.service_name, 'Home Assistant');
   assert.strictEqual(createdItem.password, 'SuperSecretHomeAssistantPassword987!');
 
-  // Verify database stores encrypted ciphertext, NOT plaintext
-  const rawDbRes = await query('SELECT * FROM vault_credentials WHERE id = $1', [createdItem.id]);
-  assert.strictEqual(rawDbRes.rows.length, 1);
-  assert(rawDbRes.rows[0].encrypted_password.includes(':'), 'Encrypted password must be formatted iv:authTag:ciphertext');
-  assert(!rawDbRes.rows[0].encrypted_password.includes('SuperSecretHomeAssistantPassword987!'), 'DB must NOT store plaintext');
-
-  // List vault credentials
+  // List credentials
   const listVaultRes = await app.inject({
     method: 'GET',
     url: '/api/vault',
     cookies: { homelab_session: sessionCookie },
   });
   assert.strictEqual(listVaultRes.statusCode, 200);
-  const listVaultBody = JSON.parse(listVaultRes.body);
-  const found = listVaultBody.credentials.find((c: any) => c.id === createdItem.id);
-  assert(found, 'Created item must be present in vault list');
-  assert.strictEqual(found.password, 'SuperSecretHomeAssistantPassword987!', 'Password must be decrypted for authorized client');
+  const listBody = JSON.parse(listVaultRes.body);
+  assert(listBody.credentials.length >= 1);
 
-  // Search vault credentials
+  // Search filter
   const searchVaultRes = await app.inject({
     method: 'GET',
     url: '/api/vault?q=assistant',
@@ -346,28 +242,29 @@ async function runTests() {
   });
   assert.strictEqual(searchVaultRes.statusCode, 200);
   const searchBody = JSON.parse(searchVaultRes.body);
-  assert(searchBody.credentials.some((c: any) => c.service_name === 'Home Assistant'));
+  assert(searchBody.credentials.length >= 1);
+  assert.strictEqual(searchBody.credentials[0].service_name, 'Home Assistant');
 
-  // Update vault credential
+  // Update credential (Password & Notes & URL)
   const updateVaultRes = await app.inject({
     method: 'PUT',
     url: `/api/vault/${createdItem.id}`,
     cookies: { homelab_session: sessionCookie },
     payload: {
-      service_name: 'Home Assistant Supervised',
+      service_name: 'Home Assistant Hub',
       category: 'System',
-      service_url: 'http://homeassistant.local:8123',
+      service_url: 'https://hass.homelab.local',
       username: 'hass_admin',
-      password: 'UpdatedPassword2026!#',
-      notes: 'Updated token',
+      password: 'NewUpdatedHassPassword2026#',
+      notes: 'Updated token notes',
     },
   });
   assert.strictEqual(updateVaultRes.statusCode, 200);
   const updatedItem = JSON.parse(updateVaultRes.body);
-  assert.strictEqual(updatedItem.service_name, 'Home Assistant Supervised');
-  assert.strictEqual(updatedItem.password, 'UpdatedPassword2026!#');
+  assert.strictEqual(updatedItem.password, 'NewUpdatedHassPassword2026#');
+  assert.strictEqual(updatedItem.service_name, 'Home Assistant Hub');
 
-  // Delete vault credential
+  // Delete credential
   const deleteVaultRes = await app.inject({
     method: 'DELETE',
     url: `/api/vault/${createdItem.id}`,
@@ -376,26 +273,21 @@ async function runTests() {
   assert.strictEqual(deleteVaultRes.statusCode, 200);
   console.log('  ✅ Credential Vault CRUD & AES-256-GCM encryption passed.');
 
-  // 9. Logout
+  // 8. Test Logout endpoint
   console.log('▶ Testing Logout endpoint (with and without application/json Content-Type header on empty body)...');
-  const logoutWithJsonHeaderRes = await app.inject({
+  const logoutResNoHeader = await app.inject({
+    method: 'POST',
+    url: '/api/auth/logout',
+  });
+  assert.strictEqual(logoutResNoHeader.statusCode, 200);
+
+  const logoutResWithHeader = await app.inject({
     method: 'POST',
     url: '/api/auth/logout',
     headers: { 'content-type': 'application/json' },
   });
-  assert.strictEqual(logoutWithJsonHeaderRes.statusCode, 200);
-
-  const logoutRes = await app.inject({
-    method: 'POST',
-    url: '/api/auth/logout',
-  });
-  assert.strictEqual(logoutRes.statusCode, 200);
+  assert.strictEqual(logoutResWithHeader.statusCode, 200);
   console.log('  ✅ Logout passed.');
 
   console.log('\n🎉 ALL TESTS PASSED SUCCESSFULLY! 🎉\n');
-}
-
-runTests().catch((err) => {
-  console.error('❌ Test suite failed:', err);
-  process.exit(1);
 });

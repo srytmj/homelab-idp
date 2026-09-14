@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import crypto from 'crypto';
 import { initDb, closeDb, query } from './db/index.js';
 import { hashPassword } from './crypto/hash.js';
 import { encryptAesGcm, decryptAesGcm } from './crypto/aes.js';
@@ -21,16 +20,6 @@ async function resolveUser(target: string) {
   }
   const byUsername = await query('SELECT * FROM users WHERE LOWER(username) = LOWER($1)', [clean]);
   return byUsername.rows[0] || null;
-}
-
-async function resolveOidcClient(target: string) {
-  const clean = target.trim();
-  if (isUuid(clean)) {
-    const byId = await query('SELECT * FROM oidc_clients WHERE id = $1', [clean]);
-    if (byId.rows.length > 0) return byId.rows[0];
-  }
-  const byClientId = await query('SELECT * FROM oidc_clients WHERE client_id = $1', [clean]);
-  return byClientId.rows[0] || null;
 }
 
 async function resolveVaultCredential(target: string): Promise<any | null> {
@@ -136,7 +125,7 @@ function getOption(options: Record<string, string | boolean | string[]>, keys: s
 
 function printHelp() {
   console.log(`
-homelab-idp CLI - Identity, Single Sign-On, and Vault Management
+homelab-idp CLI - Password Bank & Nginx Forward Auth Manager
 
 USAGE:
   homelab-idp <command> <subcommand> [options]
@@ -148,11 +137,6 @@ COMMANDS:
     update, edit    Update user profile (username, email, display name, password)
     passwd          Update a user's password
     delete          Delete a user account
-
-  oidc
-    register, add   Register a new OIDC client application
-    list            List all registered OIDC client applications
-    delete          Remove an OIDC client application
 
   vault
     add, create     Store a new secret / password in the vault
@@ -178,8 +162,14 @@ EXAMPLES:
   # 2. Update vault password by service name
   homelab-idp vault update Nextcloud --password "NewNextcloudSecretPass!"
 
-  # 3. Delete vault entry by service name
+  # 3. Inspect a vault entry with decrypted password
+  homelab-idp vault get Nextcloud --reveal
+
+  # 4. Delete vault entry by service name
   homelab-idp vault delete Nextcloud
+
+  # 5. Generate a JWT forward-auth token
+  homelab-idp token generate --username admin --hours 24
 `);
 }
 
@@ -249,10 +239,10 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
 
   if (subcommand === 'passwd' || subcommand === 'password') {
     const target = positionals[0] || getOption(options, ['username', 'id', 'user']);
-    const password = getOption(options, ['password', 'p', 'pass']);
+    const password = getOption(options, ['password', 'p', 'pass']) || positionals[1];
 
     if (!target || !password) {
-      console.error('Error: target user and --password are required.');
+      console.error('Error: target user and new password are required.');
       process.exit(1);
     }
 
@@ -268,15 +258,15 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
     if (isJson) {
       console.log(JSON.stringify({ success: true, message: `Password updated for ${user.username}` }, null, 2));
     } else {
-      console.log(`Password updated successfully for '${user.username}'.`);
+      console.log(`Password updated successfully for user '${user.username}'.`);
     }
     return;
   }
 
-  if (subcommand === 'update' || subcommand === 'edit' || subcommand === 'set') {
-    const target = positionals[0] || getOption(options, ['username', 'id', 'user', 'target']);
+  if (subcommand === 'update' || subcommand === 'edit') {
+    const target = positionals[0] || getOption(options, ['username', 'id', 'user']);
     if (!target) {
-      console.error('Error: target user (ID or username) is required.');
+      console.error('Error: target user is required.');
       process.exit(1);
     }
 
@@ -289,9 +279,9 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
     const newUsername = getOption(options, ['username', 'u'])?.toLowerCase();
     const newEmail = getOption(options, ['email', 'e'])?.toLowerCase();
     const newDisplayName = getOption(options, ['display-name', 'name']);
-    const newPassword = getOption(options, ['password', 'p', 'pass']);
+    const newPassword = getOption(options, ['password', 'p']);
 
-    if (newUsername && newUsername !== user.username.toLowerCase()) {
+    if (newUsername && newUsername !== user.username) {
       const dup = await query('SELECT id FROM users WHERE username = $1 AND id != $2', [newUsername, user.id]);
       if (dup.rows.length > 0) {
         console.error(`Error: Username '${newUsername}' is already taken.`);
@@ -299,32 +289,33 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
       }
     }
 
-    if (newEmail && newEmail !== user.email.toLowerCase()) {
+    if (newEmail && newEmail !== user.email) {
       const dup = await query('SELECT id FROM users WHERE email = $1 AND id != $2', [newEmail, user.id]);
       if (dup.rows.length > 0) {
-        console.error(`Error: Email '${newEmail}' is already taken.`);
+        console.error(`Error: Email '${newEmail}' is already registered.`);
         process.exit(1);
       }
     }
 
-    let passwordHash = user.password_hash;
-    if (newPassword) {
-      passwordHash = await hashPassword(newPassword);
-    }
-
     const finalUsername = newUsername || user.username;
     const finalEmail = newEmail || user.email;
-    const finalDisplayName = newDisplayName !== undefined ? newDisplayName : (user.display_name || finalUsername);
+    const finalDisplayName = newDisplayName !== undefined ? newDisplayName : user.display_name;
 
-    const updateRes = await query(
-      `UPDATE users
-       SET username = $1, email = $2, display_name = $3, password_hash = $4, updated_at = NOW()
-       WHERE id = $5
-       RETURNING id, username, email, display_name, role, updated_at`,
-      [finalUsername, finalEmail, finalDisplayName, passwordHash, user.id]
-    );
+    let updateQuery = `UPDATE users SET username = $1, email = $2, display_name = $3`;
+    const params: any[] = [finalUsername, finalEmail, finalDisplayName];
 
+    if (newPassword) {
+      const newHash = await hashPassword(newPassword);
+      updateQuery += `, password_hash = $4 WHERE id = $5 RETURNING id, username, email, display_name, role, updated_at`;
+      params.push(newHash, user.id);
+    } else {
+      updateQuery += ` WHERE id = $4 RETURNING id, username, email, display_name, role, updated_at`;
+      params.push(user.id);
+    }
+
+    const updateRes = await query(updateQuery, params);
     const updated = updateRes.rows[0];
+
     if (isJson) {
       console.log(JSON.stringify({ success: true, user: updated }, null, 2));
     } else {
@@ -367,101 +358,6 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
   process.exit(1);
 }
 
-async function handleOidc(subcommand: string, positionals: string[], options: Record<string, any>, isJson: boolean) {
-  if (subcommand === 'register' || subcommand === 'add' || subcommand === 'create') {
-    const name = getOption(options, ['name', 'client-name']) || positionals[0];
-    const customId = getOption(options, ['id', 'client-id']);
-    const scopeStr = getOption(options, ['scope', 'scopes']) || 'openid profile email';
-
-    let uris: string[] = [];
-    const rawUri = options['redirect-uri'] || options['uri'] || options['url'];
-    if (Array.isArray(rawUri)) {
-      uris = rawUri;
-    } else if (typeof rawUri === 'string') {
-      uris = rawUri.split(',').map((s) => s.trim()).filter(Boolean);
-    }
-
-    if (!name || uris.length === 0) {
-      console.error('Error: --name and at least one --redirect-uri are required.');
-      process.exit(1);
-    }
-
-    const clientId = customId || `${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
-    const rawSecret = crypto.randomBytes(24).toString('hex');
-    const secretHash = await hashPassword(rawSecret);
-    const scopes = scopeStr.split(' ').map((s) => s.trim()).filter(Boolean);
-
-    const insertRes = await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, client_id, client_name, redirect_uris, scopes, created_at`,
-      [clientId, secretHash, name, uris, scopes]
-    );
-
-    const client = insertRes.rows[0];
-
-    if (isJson) {
-      console.log(JSON.stringify({ success: true, client, client_secret: rawSecret }, null, 2));
-    } else {
-      console.log(`OIDC Client registered successfully.\n`);
-      console.log(`Client ID:     ${client.client_id}`);
-      console.log(`Client Secret: ${rawSecret}  <-- SAVE THIS NOW (Displayed Once)`);
-      console.log(`Client Name:   ${client.client_name}`);
-      console.log(`Redirect URIs: ${client.redirect_uris.join(', ')}`);
-      console.log(`Scopes:        ${client.scopes.join(', ')}`);
-    }
-    return;
-  }
-
-  if (subcommand === 'list') {
-    const res = await query('SELECT id, client_id, client_name, redirect_uris, scopes, created_at FROM oidc_clients ORDER BY created_at DESC');
-    if (isJson) {
-      console.log(JSON.stringify({ clients: res.rows }, null, 2));
-    } else {
-      if (res.rows.length === 0) {
-        console.log('No OIDC clients found.');
-        return;
-      }
-      console.log(`Found ${res.rows.length} OIDC client(s):\n`);
-      for (const c of res.rows) {
-        console.log(`Client ID:     ${c.client_id}`);
-        console.log(`Name:          ${c.client_name}`);
-        console.log(`Redirect URIs: ${c.redirect_uris.join(', ')}`);
-        console.log(`Scopes:        ${c.scopes.join(', ')}`);
-        console.log(`Created:       ${new Date(c.created_at).toISOString()}`);
-        console.log('------------------------------------------------------------');
-      }
-    }
-    return;
-  }
-
-  if (subcommand === 'delete') {
-    const target = positionals[0] || getOption(options, ['id', 'client-id']);
-    if (!target) {
-      console.error('Error: target client_id or UUID is required.');
-      process.exit(1);
-    }
-
-    const client = await resolveOidcClient(target);
-    if (!client) {
-      console.error(`Error: OIDC client '${target}' not found.`);
-      process.exit(1);
-    }
-
-    await query('DELETE FROM oidc_clients WHERE id = $1', [client.id]);
-
-    if (isJson) {
-      console.log(JSON.stringify({ success: true, message: `Deleted OIDC client ${client.client_id}`, id: client.id }, null, 2));
-    } else {
-      console.log(`OIDC client '${client.client_id}' (UUID: ${client.id}) deleted successfully.`);
-    }
-    return;
-  }
-
-  console.error(`Unknown oidc subcommand: '${subcommand}'. Use 'homelab-idp oidc --help'.`);
-  process.exit(1);
-}
-
 async function handleVault(subcommand: string, positionals: string[], options: Record<string, any>, isJson: boolean) {
   if (subcommand === 'add' || subcommand === 'create') {
     const service = getOption(options, ['service', 'service-name', 'name']) || positionals[0];
@@ -476,109 +372,109 @@ async function handleVault(subcommand: string, positionals: string[], options: R
       process.exit(1);
     }
 
-    const encPass = encryptAesGcm(password, config.vaultSecretKey);
+    const encPassword = encryptAesGcm(password, config.vaultSecretKey);
     const encNotes = notes ? encryptAesGcm(notes, config.vaultSecretKey) : '';
 
-    const insertRes = await query(
+    const res = await query(
       `INSERT INTO vault_credentials (service_name, category, service_url, username, encrypted_password, encrypted_notes)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, service_name, category, service_url, username, created_at`,
-      [service, category, url, username, encPass, encNotes]
+      [service, category, url, username, encPassword, encNotes]
     );
 
-    const item = insertRes.rows[0];
+    const created = res.rows[0];
     if (isJson) {
-      console.log(JSON.stringify({ success: true, credential: { ...item, password, notes } }, null, 2));
+      console.log(JSON.stringify({ success: true, credential: created }, null, 2));
     } else {
-      console.log(`Credential saved in vault (AES-256-GCM encrypted).\n`);
-      console.log(`ID:       ${item.id}`);
-      console.log(`Service:  ${item.service_name}`);
-      console.log(`Category: ${item.category}`);
-      console.log(`Username: ${item.username}`);
-      console.log(`URL:      ${item.service_url || '-'}`);
+      console.log(`Saved credentials for '${created.service_name}' to vault.\n`);
+      console.log(`ID:           ${created.id}`);
+      console.log(`Service:      ${created.service_name}`);
+      console.log(`Category:     ${created.category}`);
+      console.log(`Username:     ${created.username}`);
+      console.log(`URL:          ${created.service_url || '-'}`);
+      console.log(`Encryption:   AES-256-GCM (Protected)`);
     }
     return;
   }
 
   if (subcommand === 'list') {
-    const catFilter = getOption(options, ['category', 'cat']);
-    const queryFilter = getOption(options, ['query', 'q', 'search']);
+    const cat = getOption(options, ['category', 'cat']);
+    const search = getOption(options, ['query', 'q', 'search']);
     const reveal = !!options['reveal'] || !!options['r'];
 
-    const res = await query('SELECT * FROM vault_credentials ORDER BY updated_at DESC');
+    let sql = 'SELECT * FROM vault_credentials';
+    const params: any[] = [];
+    const where: string[] = [];
 
-    const items = res.rows
-      .map((row) => {
-        let password = '••••••••••••';
-        let notes = '';
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(LOWER(service_name) LIKE LOWER($${params.length}) OR LOWER(username) LIKE LOWER($${params.length}))`);
+    }
 
-        if (reveal) {
-          try {
-            password = decryptAesGcm(row.encrypted_password, config.vaultSecretKey);
-          } catch {
-            password = '[DECRYPTION ERROR]';
-          }
-        }
+    if (cat && cat !== 'All') {
+      params.push(cat);
+      where.push(`LOWER(category) = LOWER($${params.length})`);
+    }
 
+    if (where.length > 0) {
+      sql += ' WHERE ' + where.join(' AND ');
+    }
+
+    sql += ' ORDER BY created_at DESC';
+
+    const res = await query(sql, params);
+
+    const mapped = res.rows.map((r) => {
+      let password = '••••••••••••';
+      let notes = '';
+
+      if (reveal) {
         try {
-          if (row.encrypted_notes) {
-            notes = decryptAesGcm(row.encrypted_notes, config.vaultSecretKey);
-          }
+          password = decryptAesGcm(r.encrypted_password, config.vaultSecretKey);
+          notes = r.encrypted_notes ? decryptAesGcm(r.encrypted_notes, config.vaultSecretKey) : '';
         } catch {
-          notes = '[DECRYPTION ERROR]';
+          password = '[DECRYPTION FAILED]';
         }
+      }
 
-        return {
-          id: row.id,
-          service_name: row.service_name,
-          category: row.category,
-          service_url: row.service_url,
-          username: row.username,
-          password,
-          notes,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-        };
-      })
-      .filter((item) => {
-        if (catFilter && item.category.toLowerCase() !== catFilter.toLowerCase()) return false;
-        if (queryFilter) {
-          const q = queryFilter.toLowerCase();
-          return (
-            item.service_name.toLowerCase().includes(q) ||
-            item.username.toLowerCase().includes(q) ||
-            item.service_url.toLowerCase().includes(q) ||
-            item.notes.toLowerCase().includes(q)
-          );
-        }
-        return true;
-      });
+      return {
+        id: r.id,
+        service_name: r.service_name,
+        category: r.category,
+        service_url: r.service_url,
+        username: r.username,
+        password,
+        notes,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      };
+    });
 
     if (isJson) {
-      console.log(JSON.stringify({ credentials: items }, null, 2));
+      console.log(JSON.stringify({ credentials: mapped }, null, 2));
     } else {
-      if (items.length === 0) {
-        console.log('No vault credentials found.');
+      if (mapped.length === 0) {
+        console.log('No credentials found in vault.');
         return;
       }
-      console.log(`Found ${items.length} credential(s):\n`);
-      console.log(`SERVICE                   CATEGORY        USERNAME             PASSWORD`);
-      console.log(`------------------------  --------------  -------------------  --------------------`);
-      for (const item of items) {
-        const s = item.service_name.padEnd(24).slice(0, 24);
-        const c = item.category.padEnd(14).slice(0, 14);
-        const u = item.username.padEnd(19).slice(0, 19);
-        console.log(`${s}  ${c}  ${u}  ${item.password}`);
+      console.log(`Found ${mapped.length} credential(s):\n`);
+      console.log(`SERVICE              CATEGORY        USERNAME         PASSWORD`);
+      console.log(`-------------------  --------------  ---------------  -------------------`);
+      for (const m of mapped) {
+        const s = m.service_name.padEnd(19).slice(0, 19);
+        const c = m.category.padEnd(14).slice(0, 14);
+        const u = m.username.padEnd(15).slice(0, 15);
+        console.log(`${s}  ${c}  ${u}  ${m.password}`);
       }
       if (!reveal) {
-        console.log(`\n(Passwords masked. Pass --reveal to decrypt and display plaintext.)`);
+        console.log('\n(Passwords are masked. Use --reveal or -r to view in plaintext)');
       }
     }
     return;
   }
 
   if (subcommand === 'get') {
-    const target = positionals[0] || getOption(options, ['service', 'id', 'name']);
+    const target = positionals[0] || getOption(options, ['id', 'service']);
     const reveal = !!options['reveal'] || !!options['r'];
 
     if (!target) {
@@ -598,20 +494,13 @@ async function handleVault(subcommand: string, positionals: string[], options: R
     if (reveal) {
       try {
         password = decryptAesGcm(row.encrypted_password, config.vaultSecretKey);
+        notes = row.encrypted_notes ? decryptAesGcm(row.encrypted_notes, config.vaultSecretKey) : '';
       } catch {
-        password = '[DECRYPTION ERROR]';
+        password = '[DECRYPTION FAILED]';
       }
     }
 
-    try {
-      if (row.encrypted_notes) {
-        notes = decryptAesGcm(row.encrypted_notes, config.vaultSecretKey);
-      }
-    } catch {
-      notes = '[DECRYPTION ERROR]';
-    }
-
-    const item = {
+    const output = {
       id: row.id,
       service_name: row.service_name,
       category: row.category,
@@ -624,18 +513,17 @@ async function handleVault(subcommand: string, positionals: string[], options: R
     };
 
     if (isJson) {
-      console.log(JSON.stringify({ credential: item }, null, 2));
+      console.log(JSON.stringify(output, null, 2));
     } else {
-      console.log(`Vault Entry: ${item.service_name}\n`);
-      console.log(`ID:       ${item.id}`);
-      console.log(`Category: ${item.category}`);
-      console.log(`URL:      ${item.service_url || '-'}`);
-      console.log(`Username: ${item.username}`);
-      console.log(`Password: ${item.password}`);
-      console.log(`Notes:    ${item.notes || '-'}`);
-      if (!reveal) {
-        console.log(`\n(Pass --reveal to decrypt and display plaintext password.)`);
-      }
+      console.log(`Credential Details for '${output.service_name}':\n`);
+      console.log(`ID:           ${output.id}`);
+      console.log(`Service:      ${output.service_name}`);
+      console.log(`Category:     ${output.category}`);
+      console.log(`URL:          ${output.service_url || '-'}`);
+      console.log(`Username:     ${output.username}`);
+      console.log(`Password:     ${output.password}`);
+      if (notes) console.log(`Notes:        ${output.notes}`);
+      console.log(`Created:      ${new Date(output.created_at).toISOString()}`);
     }
     return;
   }
@@ -656,25 +544,18 @@ async function handleVault(subcommand: string, positionals: string[], options: R
     const service = getOption(options, ['service', 'service-name', 'name']) || existing.service_name;
     const username = getOption(options, ['username', 'u', 'user']) || existing.username;
     const category = getOption(options, ['category', 'cat']) || existing.category;
-    const url = getOption(options, ['url', 'service-url']) !== undefined ? getOption(options, ['url', 'service-url'])! : existing.service_url;
+    const url = getOption(options, ['url', 'service-url']) !== undefined ? getOption(options, ['url', 'service-url']) : existing.service_url;
+    const notes = getOption(options, ['notes', 'note']);
+    const password = getOption(options, ['password', 'p', 'pass']);
 
-    let encPass = existing.encrypted_password;
-    const newPass = getOption(options, ['password', 'p', 'pass']);
-    if (newPass) {
-      encPass = encryptAesGcm(newPass, config.vaultSecretKey);
-    }
-
-    let encNotes = existing.encrypted_notes;
-    const newNotes = getOption(options, ['notes', 'note']);
-    if (newNotes !== undefined) {
-      encNotes = newNotes ? encryptAesGcm(newNotes, config.vaultSecretKey) : '';
-    }
+    const encPassword = password ? encryptAesGcm(password, config.vaultSecretKey) : existing.encrypted_password;
+    const encNotes = notes !== undefined ? (notes ? encryptAesGcm(notes, config.vaultSecretKey) : '') : existing.encrypted_notes;
 
     await query(
       `UPDATE vault_credentials
        SET service_name = $1, category = $2, service_url = $3, username = $4, encrypted_password = $5, encrypted_notes = $6, updated_at = NOW()
        WHERE id = $7`,
-      [service, category, url, username, encPass, encNotes, existing.id]
+      [service, category, url, username, encPassword, encNotes, existing.id]
     );
 
     if (isJson) {
@@ -713,9 +594,9 @@ async function handleVault(subcommand: string, positionals: string[], options: R
 }
 
 async function handleToken(subcommand: string, positionals: string[], options: Record<string, any>, isJson: boolean) {
-  if (subcommand === 'generate' || subcommand === 'create') {
+  if (subcommand === 'generate') {
     const username = getOption(options, ['username', 'u', 'user']) || positionals[0];
-    const ttlHours = parseInt(getOption(options, ['hours', 'ttl']) || '24', 10);
+    const hours = parseInt(getOption(options, ['hours', 'h']) || '24', 10);
 
     if (!username) {
       console.error('Error: --username is required.');
@@ -735,18 +616,15 @@ async function handleToken(subcommand: string, positionals: string[], options: R
         email: user.email,
         displayName: user.display_name || user.username,
         role: user.role || 'member',
-        avatarUrl: user.avatar_url,
       },
-      ttlHours
+      hours
     );
 
     if (isJson) {
-      console.log(JSON.stringify({ success: true, token, expires_in_hours: ttlHours, user: { id: user.id, username: user.username, email: user.email, role: user.role } }, null, 2));
+      console.log(JSON.stringify({ token, expires_in_hours: hours, user: { id: user.id, username: user.username } }, null, 2));
     } else {
-      console.log(`Session Token Generated (${ttlHours}h validity):\n`);
+      console.log(`Signed Session JWT generated for '${user.username}' (Valid for ${hours}h):\n`);
       console.log(token);
-      console.log(`\nUsage with curl:`);
-      console.log(`curl -H "Authorization: Bearer ${token}" http://localhost:4000/api/vault`);
     }
     return;
   }
@@ -756,7 +634,7 @@ async function handleToken(subcommand: string, positionals: string[], options: R
 }
 
 async function handleForwardAuth(subcommand: string, positionals: string[], options: Record<string, any>, isJson: boolean) {
-  if (subcommand === 'test') {
+  if (subcommand === 'test' || subcommand === 'verify') {
     const token = getOption(options, ['token', 't']) || positionals[0];
     if (!token) {
       console.error('Error: --token is required.');
@@ -766,9 +644,9 @@ async function handleForwardAuth(subcommand: string, positionals: string[], opti
     const payload = await verifySessionToken(token);
     if (!payload) {
       if (isJson) {
-        console.log(JSON.stringify({ status: 401, error: 'Unauthorized', message: 'Token invalid or expired' }, null, 2));
+        console.log(JSON.stringify({ status: 401, error: 'Unauthorized', message: 'Invalid or expired token' }, null, 2));
       } else {
-        console.log(`Status: 401 Unauthorized (Token invalid or expired)`);
+        console.log(`Status: 401 Unauthorized (Invalid or expired token)`);
       }
       process.exit(1);
     }
@@ -827,10 +705,6 @@ async function main() {
         await handleUser(parsed.subcommand, parsed.positionals, parsed.options, isJson);
         break;
 
-      case 'oidc':
-        await handleOidc(parsed.subcommand, parsed.positionals, parsed.options, isJson);
-        break;
-
       case 'vault':
         await handleVault(parsed.subcommand, parsed.positionals, parsed.options, isJson);
         break;
@@ -840,20 +714,16 @@ async function main() {
         break;
 
       case 'forward-auth':
-      case 'forwardauth':
+      case 'verify':
         await handleForwardAuth(parsed.subcommand, parsed.positionals, parsed.options, isJson);
         break;
 
       default:
-        console.error(`Unknown command: '${parsed.command}'. Use 'homelab-idp --help'.`);
+        console.error(`Unknown command: '${parsed.command}'. Run 'homelab-idp --help' for usage.`);
         process.exit(1);
     }
   } catch (err: any) {
-    if (isJson) {
-      console.error(JSON.stringify({ success: false, error: err.message }, null, 2));
-    } else {
-      console.error(`Execution error: ${err.message}`);
-    }
+    console.error(`Error: ${err.message}`);
     process.exit(1);
   } finally {
     await closeDb();
