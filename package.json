@@ -11,5 +11,8 @@
     "dev:backend": "cd backend && npm run dev",
     "dev:frontend": "cd frontend && npm run dev",
     "test": "cd backend && npm test"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.10.0"
   }
 }
