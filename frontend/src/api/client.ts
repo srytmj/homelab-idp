@@ -31,12 +31,14 @@ export interface OidcClient {
 const API_BASE = '';
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (options.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const res = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers,
     credentials: 'include', // sends cookies
   });
 
@@ -68,6 +70,19 @@ export const api = {
   async logout(): Promise<{ success: boolean }> {
     return request('/api/auth/logout', {
       method: 'POST',
+    });
+  },
+
+  async updateProfile(data: {
+    username?: string;
+    email?: string;
+    displayName?: string;
+    currentPassword?: string;
+    newPassword?: string;
+  }): Promise<{ success: boolean; user: User; message: string }> {
+    return request('/api/auth/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data),
     });
   },
 

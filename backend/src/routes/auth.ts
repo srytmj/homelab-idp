@@ -18,6 +18,19 @@ const registerSchema = z.object({
   displayName: z.string().optional(),
 });
 
+const updateProfileSchema = z.object({
+  username: z
+    .string()
+    .min(3, 'Username must be at least 3 characters')
+    .max(64)
+    .regex(/^[a-zA-Z0-9._-]+$/, 'Username can only contain letters, numbers, dots, underscores, and dashes')
+    .optional(),
+  email: z.string().email('Invalid email address').optional(),
+  displayName: z.string().max(128).optional(),
+  currentPassword: z.string().optional(),
+  newPassword: z.string().min(8, 'New password must be at least 8 characters').optional(),
+});
+
 export async function authRoutes(fastify: FastifyInstance) {
   // POST /api/auth/register
   fastify.post(
@@ -194,6 +207,135 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     return reply.send({
       user,
+    });
+  });
+
+  // PUT /api/auth/profile - Update SSO Username, Email, Display Name, and/or Password
+  fastify.put('/profile', async (request: FastifyRequest, reply: FastifyReply) => {
+    const currentUser = await getAuthenticatedUser(request);
+    if (!currentUser) {
+      return reply.status(401).send({
+        error: 'Unauthorized',
+        message: 'No active session',
+      });
+    }
+
+    const parsed = updateProfileSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: 'Validation failed',
+        message: parsed.error.issues[0]?.message || 'Validation failed',
+        issues: parsed.error.issues,
+      });
+    }
+
+    const { username, email, displayName, currentPassword, newPassword } = parsed.data;
+
+    // Fetch existing user record with password_hash
+    const userRes = await query('SELECT * FROM users WHERE id = $1', [currentUser.userId]);
+    if (userRes.rows.length === 0) {
+      return reply.status(404).send({
+        error: 'Not found',
+        message: 'User account not found',
+      });
+    }
+
+    const dbUser = userRes.rows[0];
+
+    // Password change logic
+    let passwordHash = dbUser.password_hash;
+    if (newPassword) {
+      if (!currentPassword) {
+        return reply.status(400).send({
+          error: 'Current password required',
+          message: 'Current password is required to set a new password',
+        });
+      }
+      const isCurrentValid = await verifyPassword(dbUser.password_hash, currentPassword);
+      if (!isCurrentValid) {
+        return reply.status(400).send({
+          error: 'Invalid password',
+          message: 'Current password is incorrect',
+        });
+      }
+      passwordHash = await hashPassword(newPassword);
+    } else if (currentPassword) {
+      // If current password was provided to verify identity
+      const isCurrentValid = await verifyPassword(dbUser.password_hash, currentPassword);
+      if (!isCurrentValid) {
+        return reply.status(400).send({
+          error: 'Invalid password',
+          message: 'Current password is incorrect',
+        });
+      }
+    }
+
+    const finalUsername = username ? username.trim().toLowerCase() : dbUser.username.toLowerCase();
+    const finalEmail = email ? email.trim().toLowerCase() : dbUser.email.toLowerCase();
+    const finalDisplayName = displayName !== undefined ? displayName.trim() : (dbUser.display_name || finalUsername);
+
+    // Check username uniqueness if changed
+    if (finalUsername !== dbUser.username.toLowerCase()) {
+      const checkUser = await query('SELECT id FROM users WHERE username = $1 AND id != $2', [
+        finalUsername,
+        currentUser.userId,
+      ]);
+      if (checkUser.rows.length > 0) {
+        return reply.status(409).send({
+          error: 'Username taken',
+          message: `Username '${username}' is already registered by another account`,
+        });
+      }
+    }
+
+    // Check email uniqueness if changed
+    if (finalEmail !== dbUser.email.toLowerCase()) {
+      const checkEmail = await query('SELECT id FROM users WHERE email = $1 AND id != $2', [
+        finalEmail,
+        currentUser.userId,
+      ]);
+      if (checkEmail.rows.length > 0) {
+        return reply.status(409).send({
+          error: 'Email taken',
+          message: `Email '${email}' is already registered by another account`,
+        });
+      }
+    }
+
+    const updateRes = await query(
+      `UPDATE users
+       SET username = $1, email = $2, display_name = $3, password_hash = $4, updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, username, email, display_name, role, avatar_url, updated_at`,
+      [finalUsername, finalEmail, finalDisplayName, passwordHash, currentUser.userId]
+    );
+
+    const updated = updateRes.rows[0];
+    const userPayload = {
+      userId: updated.id,
+      username: updated.username,
+      email: updated.email,
+      displayName: updated.display_name || updated.username,
+      role: updated.role || 'member',
+      avatarUrl: updated.avatar_url,
+    };
+
+    const token = await signSessionToken(userPayload);
+
+    // Refresh cookie
+    reply.setCookie('homelab_session', token, {
+      path: '/',
+      httpOnly: true,
+      secure: config.nodeEnv === 'production',
+      sameSite: 'lax',
+      maxAge: config.sessionTtlHours * 3600,
+    });
+
+    return reply.send({
+      success: true,
+      user: userPayload,
+      token,
+      message: 'Account & SSO profile updated successfully',
     });
   });
 }

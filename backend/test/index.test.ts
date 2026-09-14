@@ -144,7 +144,7 @@ async function runTests() {
   assert.strictEqual(loginRes.statusCode, 200);
   const loginBody = JSON.parse(loginRes.body);
   assert.strictEqual(loginBody.user.username, config.initialAdmin.username);
-  const sessionCookie = loginRes.cookies.find((c) => c.name === 'homelab_session')?.value;
+  let sessionCookie = loginRes.cookies.find((c) => c.name === 'homelab_session')?.value;
   assert(sessionCookie, 'homelab_session cookie must be set');
 
   // Verify auth session (/api/auth/me)
@@ -156,6 +156,56 @@ async function runTests() {
   assert.strictEqual(meRes.statusCode, 200);
   const meBody = JSON.parse(meRes.body);
   assert.strictEqual(meBody.user.username, config.initialAdmin.username);
+
+  // 5b. Test Update Profile & Settings (PUT /api/auth/profile)
+  console.log('▶ Testing Profile & Account Settings (PUT /api/auth/profile)...');
+  // Rejection with wrong current password when updating password
+  const badPassRes = await app.inject({
+    method: 'PUT',
+    url: '/api/auth/profile',
+    cookies: { homelab_session: sessionCookie },
+    payload: {
+      currentPassword: 'wrong_current_password',
+      newPassword: 'BrandNewStrongPassword2026!',
+    },
+  });
+  assert.strictEqual(badPassRes.statusCode, 400, 'Invalid current password should fail');
+
+  // Update username, email, and password successfully
+  const updateProfileRes = await app.inject({
+    method: 'PUT',
+    url: '/api/auth/profile',
+    cookies: { homelab_session: sessionCookie },
+    payload: {
+      username: 'admin_updated',
+      email: 'admin.updated@homelab.local',
+      displayName: 'Lead Homelab Admin',
+      currentPassword: config.initialAdmin.password,
+      newPassword: 'BrandNewStrongPassword2026!',
+    },
+  });
+  assert.strictEqual(updateProfileRes.statusCode, 200, 'Profile update should return 200 OK');
+  const updatedProfileBody = JSON.parse(updateProfileRes.body);
+  assert.strictEqual(updatedProfileBody.user.username, 'admin_updated');
+  assert.strictEqual(updatedProfileBody.user.email, 'admin.updated@homelab.local');
+  assert.strictEqual(updatedProfileBody.user.displayName, 'Lead Homelab Admin');
+
+  // New cookie from profile update
+  const newCookie = updateProfileRes.cookies.find((c) => c.name === 'homelab_session')?.value;
+  assert(newCookie, 'Updated session cookie should be issued');
+  sessionCookie = newCookie;
+
+  // Verify login with newly updated credentials
+  const newLoginRes = await app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: {
+      username: 'admin_updated',
+      password: 'BrandNewStrongPassword2026!',
+    },
+  });
+  assert.strictEqual(newLoginRes.statusCode, 200, 'Login with updated username & password should succeed');
+  console.log('  ✅ Profile & Account Settings update passed.');
 
   // 6. Test Forward Auth (/api/auth/verify)
   console.log('▶ Testing Forward Auth endpoint for Nginx Proxy Manager...');
@@ -171,10 +221,10 @@ async function runTests() {
     cookies: { homelab_session: sessionCookie },
   });
   assert.strictEqual(authVerify.statusCode, 200, 'Authenticated forward auth must return 200 OK');
-  assert.strictEqual(authVerify.headers['remote-user'], config.initialAdmin.username);
-  assert.strictEqual(authVerify.headers['remote-email'], config.initialAdmin.email);
-  assert(authVerify.headers['remote-name'], 'Remote-Name header must be present');
-  console.log('  ✅ Forward Auth passed. Correctly injects Remote-User, Remote-Email, Remote-Name.');
+  assert.strictEqual(authVerify.headers['remote-user'], 'admin_updated');
+  assert.strictEqual(authVerify.headers['remote-email'], 'admin.updated@homelab.local');
+  assert.strictEqual(authVerify.headers['remote-name'], 'Lead Homelab Admin');
+  console.log('  ✅ Forward Auth passed. Correctly injects updated Remote-User, Remote-Email, Remote-Name.');
 
   // 7. Test OIDC Discovery & JWKS
   console.log('▶ Testing OIDC Discovery & Token Flow...');
@@ -245,8 +295,8 @@ async function runTests() {
   });
   assert.strictEqual(userinfoRes.statusCode, 200);
   const userinfoBody = JSON.parse(userinfoRes.body);
-  assert.strictEqual(userinfoBody.preferred_username, config.initialAdmin.username);
-  assert.strictEqual(userinfoBody.email, config.initialAdmin.email);
+  assert.strictEqual(userinfoBody.preferred_username, 'admin_updated');
+  assert.strictEqual(userinfoBody.email, 'admin.updated@homelab.local');
   console.log('  ✅ OIDC Authorization Code Flow & Userinfo passed.');
 
   // 8. Test Credential Vault API
@@ -327,11 +377,20 @@ async function runTests() {
   console.log('  ✅ Credential Vault CRUD & AES-256-GCM encryption passed.');
 
   // 9. Logout
+  console.log('▶ Testing Logout endpoint (with and without application/json Content-Type header on empty body)...');
+  const logoutWithJsonHeaderRes = await app.inject({
+    method: 'POST',
+    url: '/api/auth/logout',
+    headers: { 'content-type': 'application/json' },
+  });
+  assert.strictEqual(logoutWithJsonHeaderRes.statusCode, 200);
+
   const logoutRes = await app.inject({
     method: 'POST',
     url: '/api/auth/logout',
   });
   assert.strictEqual(logoutRes.statusCode, 200);
+  console.log('  ✅ Logout passed.');
 
   console.log('\n🎉 ALL TESTS PASSED SUCCESSFULLY! 🎉\n');
 }

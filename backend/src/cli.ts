@@ -90,6 +90,7 @@ COMMANDS:
   user, sso
     add, register   Register a new SSO user account
     list            List all registered users
+    update, edit    Update user profile (username, email, display name, password)
     passwd          Update a user's password
     delete          Delete a user account
 
@@ -119,16 +120,19 @@ EXAMPLES:
   # 1. Register an SSO user
   homelab-idp user add --username alice --email alice@homelab.local --password "SecretPass123!" --role member
 
-  # 2. Register an OIDC application (e.g. Nextcloud or Komga)
+  # 2. Update an SSO user profile
+  homelab-idp user update alice --email "alice.new@homelab.local" --display-name "Alice Smith"
+
+  # 3. Register an OIDC application (e.g. Nextcloud or Komga)
   homelab-idp oidc register --name "Nextcloud Storage" --redirect-uri "https://cloud.homelab.local/apps/user_oidc/code"
 
-  # 3. Add credentials to vault
+  # 4. Add credentials to vault
   homelab-idp vault add --service "Proxmox Cluster" --username "root@pam" --password "PveP@ssword2026" --category "Infrastructure"
 
-  # 4. List credentials in JSON for AI agent processing
+  # 5. List credentials in JSON for AI agent processing
   homelab-idp vault list --json --reveal
 
-  # 5. Generate a JWT token directly for automated scripts
+  # 6. Generate a JWT token directly for automated scripts
   homelab-idp token generate --username admin --hours 24
 `);
 }
@@ -223,6 +227,74 @@ async function handleUser(subcommand: string, positionals: string[], options: Re
     return;
   }
 
+  if (subcommand === 'update' || subcommand === 'edit' || subcommand === 'set') {
+    const target = positionals[0] || getOption(options, ['username', 'id', 'user', 'target']);
+    if (!target) {
+      console.error('Error: target user (ID or username) is required.');
+      process.exit(1);
+    }
+
+    const check = await query('SELECT * FROM users WHERE id = $1 OR username = $1', [target]);
+    if (check.rows.length === 0) {
+      console.error(`Error: User '${target}' not found.`);
+      process.exit(1);
+    }
+
+    const user = check.rows[0];
+    const newUsername = getOption(options, ['username', 'u'])?.toLowerCase();
+    const newEmail = getOption(options, ['email', 'e'])?.toLowerCase();
+    const newDisplayName = getOption(options, ['display-name', 'name']);
+    const newPassword = getOption(options, ['password', 'p', 'pass']);
+
+    if (newUsername && newUsername !== user.username.toLowerCase()) {
+      const dup = await query('SELECT id FROM users WHERE username = $1 AND id != $2', [newUsername, user.id]);
+      if (dup.rows.length > 0) {
+        console.error(`Error: Username '${newUsername}' is already taken.`);
+        process.exit(1);
+      }
+    }
+
+    if (newEmail && newEmail !== user.email.toLowerCase()) {
+      const dup = await query('SELECT id FROM users WHERE email = $1 AND id != $2', [newEmail, user.id]);
+      if (dup.rows.length > 0) {
+        console.error(`Error: Email '${newEmail}' is already taken.`);
+        process.exit(1);
+      }
+    }
+
+    let passwordHash = user.password_hash;
+    if (newPassword) {
+      passwordHash = await hashPassword(newPassword);
+    }
+
+    const finalUsername = newUsername || user.username;
+    const finalEmail = newEmail || user.email;
+    const finalDisplayName = newDisplayName !== undefined ? newDisplayName : (user.display_name || finalUsername);
+
+    const updateRes = await query(
+      `UPDATE users
+       SET username = $1, email = $2, display_name = $3, password_hash = $4, updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, username, email, display_name, role, updated_at`,
+      [finalUsername, finalEmail, finalDisplayName, passwordHash, user.id]
+    );
+
+    const updated = updateRes.rows[0];
+    if (isJson) {
+      console.log(JSON.stringify({ success: true, user: updated }, null, 2));
+    } else {
+      console.log(`User '${updated.username}' updated successfully.`);
+      console.log(`ID:           ${updated.id}`);
+      console.log(`Username:     ${updated.username}`);
+      console.log(`Email:        ${updated.email}`);
+      console.log(`Display Name: ${updated.display_name}`);
+      if (newPassword) {
+        console.log(`Password:     [UPDATED]`);
+      }
+    }
+    return;
+  }
+
   if (subcommand === 'delete') {
     const target = positionals[0] || getOption(options, ['username', 'id', 'user']);
     if (!target) {
@@ -276,9 +348,7 @@ async function handleOidc(subcommand: string, positionals: string[], options: Re
     const scopes = scopeStr.split(' ').map((s) => s.trim()).filter(Boolean);
 
     const insertRes = await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, client_id, client_name, redirect_uris, scopes, created_at`,
+      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)\n       VALUES ($1, $2, $3, $4, $5)\n       RETURNING id, client_id, client_name, redirect_uris, scopes, created_at`,
       [clientId, secretHash, name, uris, scopes]
     );
 
@@ -740,9 +810,9 @@ async function main() {
     }
   } catch (err: any) {
     if (isJson) {
-      console.error(JSON.stringify({ error: err.message }, null, 2));
+      console.error(JSON.stringify({ success: false, error: err.message }, null, 2));
     } else {
-      console.error(`Error: ${err.message}`);
+      console.error(`Execution error: ${err.message}`);
     }
     process.exit(1);
   } finally {

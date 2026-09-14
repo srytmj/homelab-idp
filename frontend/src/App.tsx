@@ -5,6 +5,7 @@ import { Consent } from './pages/Consent';
 import { VaultDashboard } from './pages/VaultDashboard';
 import { Navbar } from './components/Navbar';
 import { ToastContainer, ToastMessage } from './components/Toast';
+import { SettingsModal } from './components/SettingsModal';
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -14,6 +15,7 @@ export function App() {
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
   const [isOidcModalOpen, setIsOidcModalOpen] = useState(false);
   const [isGuideModalOpen, setIsGuideModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
   const pathname = window.location.pathname;
   const searchParams = new URLSearchParams(window.location.search);
@@ -103,6 +105,7 @@ export function App() {
             onOpenNewModal={() => setIsNewModalOpen(true)}
             onOpenOidcModal={() => setIsOidcModalOpen(true)}
             onOpenGuideModal={() => setIsGuideModalOpen(true)}
+            onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
             onLogout={handleLogout}
           />
           <main className="flex-1">
@@ -117,6 +120,13 @@ export function App() {
               setIsGuideModalOpen={setIsGuideModalOpen}
             />
           </main>
+          <SettingsModal
+            isOpen={isSettingsModalOpen}
+            onClose={() => setIsSettingsModalOpen(false)}
+            currentUser={user}
+            onUpdateSuccess={(updatedUser) => setUser(updatedUser)}
+            onShowToast={showToast}
+          />
         </>
       )}
     </div>

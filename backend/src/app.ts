@@ -23,6 +23,22 @@ export async function buildApp() {
     trustProxy: true,
   });
 
+  // Handle empty JSON bodies gracefully instead of throwing FST_ERR_CTP_EMPTY_JSON_BODY
+  fastify.removeContentTypeParser('application/json');
+  fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    const bodyStr = typeof body === 'string' ? body : (body ? body.toString() : '');
+    if (!bodyStr || bodyStr.trim() === '') {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(bodyStr));
+    } catch (err: any) {
+      err.statusCode = 400;
+      done(err, undefined);
+    }
+  });
+
   // CORS configuration
   await fastify.register(cors, {
     origin: (origin, cb) => {

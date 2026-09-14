@@ -91,7 +91,27 @@ class MemoryDbStore {
       return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
     }
 
-    // 2c. SELECT ... FROM users WHERE username = $1
+    // 2c. SELECT ... FROM users WHERE username = $1 AND id != $2
+    if (/SELECT .* FROM users WHERE username = \$1 AND id (?:!=|<>)/i.test(trimmed)) {
+      const uVal = params[0]?.toLowerCase();
+      const idVal = params[1];
+      const user = Array.from(this.users.values()).find(
+        (u) => u.username.toLowerCase() === uVal && u.id !== idVal
+      );
+      return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
+    }
+
+    // 2d. SELECT ... FROM users WHERE email = $1 AND id != $2
+    if (/SELECT .* FROM users WHERE email = \$1 AND id (?:!=|<>)/i.test(trimmed)) {
+      const eVal = params[0]?.toLowerCase();
+      const idVal = params[1];
+      const user = Array.from(this.users.values()).find(
+        (u) => u.email.toLowerCase() === eVal && u.id !== idVal
+      );
+      return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
+    }
+
+    // 2e. SELECT ... FROM users WHERE username = $1
     if (/SELECT .* FROM users WHERE username = \$1/i.test(trimmed)) {
       const username = params[0]?.toLowerCase();
       const user = Array.from(this.users.values()).find(
@@ -100,7 +120,7 @@ class MemoryDbStore {
       return { rows: user ? [{ ...user }] : [], rowCount: user ? 1 : 0 };
     }
 
-    // 2d. SELECT ... FROM users WHERE email = $1
+    // 2f. SELECT ... FROM users WHERE email = $1
     if (/SELECT .* FROM users WHERE email = \$1/i.test(trimmed)) {
       const email = params[0]?.toLowerCase();
       const user = Array.from(this.users.values()).find(
@@ -142,15 +162,34 @@ class MemoryDbStore {
       return { rows: [{ ...user }], rowCount: 1 };
     }
 
-    // 5b. UPDATE users SET password_hash
-    if (/UPDATE users SET password_hash/i.test(trimmed)) {
-      const newHash = params[0];
-      const target = params[1];
+    // 5b. UPDATE users SET
+    if (/UPDATE users SET/i.test(trimmed)) {
+      if (/password_hash = \$1 WHERE/i.test(trimmed)) {
+        const newHash = params[0];
+        const target = params[1];
+        const user = Array.from(this.users.values()).find(
+          (u) => u.id === target || u.username.toLowerCase() === String(target).toLowerCase()
+        );
+        if (user) {
+          user.password_hash = newHash;
+          user.updated_at = new Date();
+          return { rows: [{ ...user }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+
+      // General user update: [username, email, display_name, password_hash, id]
+      const targetId = params[params.length - 1];
       const user = Array.from(this.users.values()).find(
-        (u) => u.id === target || u.username.toLowerCase() === target.toLowerCase()
+        (u) => u.id === targetId || u.username.toLowerCase() === String(targetId).toLowerCase()
       );
       if (user) {
-        user.password_hash = newHash;
+        if (params.length >= 5) {
+          user.username = params[0];
+          user.email = params[1];
+          user.display_name = params[2] || params[0];
+          user.password_hash = params[3];
+        }
         user.updated_at = new Date();
         return { rows: [{ ...user }], rowCount: 1 };
       }
@@ -319,18 +358,17 @@ class MemoryDbStore {
 
     // 17. Vault: DELETE FROM vault_credentials WHERE id = $1 (or service_name = $1)
     if (/DELETE FROM vault_credentials/i.test(trimmed)) {
-      const target = params[0];
+      const id = params[0];
       const existing = Array.from(this.vaultCredentials.values()).find(
-        (v) => v.id === target || v.service_name.toLowerCase() === target.toLowerCase()
+        (v) => v.id === id || v.service_name.toLowerCase() === id.toLowerCase()
       );
       if (existing) {
         this.vaultCredentials.delete(existing.id);
-        return { rows: [{ id: existing.id }], rowCount: 1 };
+        return { rows: [{ ...existing }], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     }
 
-    // Catch-all for CREATE TABLE or extensions
     return { rows: [], rowCount: 0 };
   }
 }

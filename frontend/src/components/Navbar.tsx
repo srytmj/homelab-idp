@@ -1,5 +1,5 @@
 import React from 'react';
-import { Lock, Plus, Key, Network, LogOut, User as UserIcon } from 'lucide-react';
+import { Lock, Plus, Key, Network, LogOut, Settings } from 'lucide-react';
 import { User } from '../api/client';
 
 interface NavbarProps {
@@ -7,6 +7,7 @@ interface NavbarProps {
   onOpenNewModal: () => void;
   onOpenOidcModal: () => void;
   onOpenGuideModal: () => void;
+  onOpenSettingsModal: () => void;
   onLogout: () => void;
 }
 
@@ -15,6 +16,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenNewModal,
   onOpenOidcModal,
   onOpenGuideModal,
+  onOpenSettingsModal,
   onLogout,
 }) => {
   return (
@@ -71,20 +73,27 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* User Profile & Logout */}
           {user && (
             <div className="flex items-center gap-2">
-              <div className="hidden lg:flex flex-col items-end">
+              <button
+                type="button"
+                onClick={onOpenSettingsModal}
+                className="hidden lg:flex flex-col items-end hover:opacity-80 transition-opacity text-left"
+                title={`Pengaturan Akun & SSO (${user.username})`}
+              >
                 <span className="text-xs font-medium text-zinc-200 leading-tight">
                   {user.displayName || user.username}
                 </span>
                 <span className="text-[10px] text-zinc-500 font-mono">
                   {user.role}
                 </span>
-              </div>
-              <div
-                className="w-7 h-7 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400"
-                title={`${user.displayName} (${user.email})`}
+              </button>
+              <button
+                type="button"
+                onClick={onOpenSettingsModal}
+                className="w-7 h-7 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white transition-colors"
+                title={`Pengaturan Akun & SSO (${user.username})`}
               >
-                <UserIcon className="w-3.5 h-3.5" />
-              </div>
+                <Settings className="w-3.5 h-3.5" />
+              </button>
               <button
                 onClick={onLogout}
                 className="p-1.5 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
