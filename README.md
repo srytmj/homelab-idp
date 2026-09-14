@@ -10,6 +10,11 @@ If you are an autonomous AI agent, coding assistant, or machine operator interac
 
 - **System Role**: `homelab-idp` operates as a dual-purpose security boundary: an RFC-compliant OpenID Connect / OAuth 2.0 Authorization Server and an AES-256-GCM encrypted credential vault with Forward Auth reverse proxy injection.
 - **Machine Specifications**: Refer to [AGENTS.md](file:///root/homelab-idp/AGENTS.md) for full wire protocols, API schema tables, automation recipes, and error handling guidelines.
+- **CLI for Agents**: You do not need to operate the web browser or simulate UI interactions. Use the native `homelab-idp` CLI with the `--json` flag to inspect and configure the system:
+  - Add SSO user: `homelab-idp user add --username <user> --email <email> --password <pass> --json`
+  - Register OIDC client: `homelab-idp oidc register --name <app> --redirect-uri <uri> --json`
+  - Manage vault secrets: `homelab-idp vault add/list/get --json`
+  - Generate bearer token: `homelab-idp token generate --username <user> --json`
 - **Machine Discovery**:
   - OpenID Configuration: `GET /.well-known/openid-configuration`
   - Public JWKS: `GET /.well-known/jwks.json`
@@ -67,46 +72,153 @@ If you are an autonomous AI agent, coding assistant, or machine operator interac
    - One-click clipboard copy for usernames and passwords with toast confirmation.
    - Masked password toggle and built-in entropy password generator.
 
-4. **Minimalist Monochrome Interface**:
+4. **Command-Line Interface (CLI)**:
+   - Full command-line management for terminal users and AI agents.
+   - User account registration, OIDC client registration, and encrypted vault operations.
+   - Direct JWT token issuance for headless scripting.
+   - Global `--json` flag across all commands for machine-parseable output.
+
+5. **Minimalist Monochrome Interface**:
    - High data-density interface built with pure neutral grays, stark blacks, and crisp whites.
    - Zero unnecessary gradients, neon effects, or visual bloat.
    - Responsive switching between Card Grid and Table views.
 
 ---
 
-## Project Structure
+## Command-Line Management (CLI)
 
+`homelab-idp` includes a built-in CLI utility for managing SSO users, OIDC client applications, and encrypted vault entries directly from your terminal or shell scripts.
+
+### Running the CLI
+
+- **From repository root**:
+  ```bash
+  ./bin/homelab-idp <command> [options]
+  # Or via npm
+  npm run cli -- <command> [options]
+  ```
+- **From inside Docker container**:
+  ```bash
+  docker compose exec homelab-idp homelab-idp <command> [options]
+  ```
+
+---
+
+### 1. User and SSO Management
+
+#### Register / Add an SSO User
+```bash
+# Human readable
+./bin/homelab-idp user add --username alice --email alice@homelab.local --password "SecretPassword123!" --name "Alice" --role member
+
+# Output as JSON (for AI agents or scripts)
+./bin/homelab-idp user add --username alice --email alice@homelab.local --password "SecretPassword123!" --json
 ```
-homelab-idp/
-├── backend/                  # Fastify and TypeScript backend engine
-│   ├── src/
-│   │   ├── config/env.ts     # Environment validation and configuration
-│   │   ├── crypto/           # AES-256-GCM, Argon2id, JWKS, and JWT utilities
-│   │   ├── db/               # PostgreSQL pool, schema migration, in-memory fallback
-│   │   ├── middleware/       # Session verification and role-based guards
-│   │   ├── routes/           # Auth, Forward Auth, OIDC Provider, and Vault APIs
-│   │   ├── app.ts            # Fastify server instance and static SPA host
-│   │   └── index.ts          # Server entrypoint
-│   ├── test/                 # Integration test suite
-│   ├── package.json
-│   └── tsconfig.json
-├── frontend/                 # React, Vite, and Tailwind CSS client
-│   ├── src/
-│   │   ├── api/client.ts     # Typed API client
-│   │   ├── components/       # Modals, Navbar, Generator, and Toast UI
-│   │   ├── pages/            # Login, Consent, and Vault Dashboard views
-│   │   ├── App.tsx
-│   │   └── index.css         # Monochrome styling tokens
-│   ├── index.html
-│   ├── vite.config.ts
-│   └── package.json
-├── docs/screenshots/         # High-resolution interface captures
-├── scripts/                  # Automated verification and screenshot scripts
-├── AGENTS.md                 # Autonomous AI agent technical specification
-├── Dockerfile                # Multi-stage production container build
-├── docker-compose.yml        # Homelab Docker deployment manifest
-├── .env.example              # Environment variables template
-└── README.md
+
+#### List Registered Users
+```bash
+./bin/homelab-idp user list
+./bin/homelab-idp user list --json
+```
+
+#### Update User Password
+```bash
+./bin/homelab-idp user passwd alice --password "NewSecurePassword2026!"
+```
+
+#### Delete User
+```bash
+./bin/homelab-idp user delete alice
+```
+
+---
+
+### 2. OIDC Client Registration
+
+#### Register a New Client Application
+```bash
+# Register Nextcloud
+./bin/homelab-idp oidc register \
+  --name "Nextcloud Storage" \
+  --redirect-uri "https://cloud.homelab.local/apps/user_oidc/code"
+
+# Register Komga with custom client ID
+./bin/homelab-idp oidc register \
+  --name "Komga Media" \
+  --id "komga-oidc" \
+  --redirect-uri "https://komga.homelab.local/login/oauth2/code/homelab-idp" \
+  --json
+```
+*Note: The CLI returns both `client_id` and the generated `client_secret`.*
+
+#### List Registered OIDC Clients
+```bash
+./bin/homelab-idp oidc list
+./bin/homelab-idp oidc list --json
+```
+
+#### Delete an OIDC Client
+```bash
+./bin/homelab-idp oidc delete komga-oidc
+```
+
+---
+
+### 3. Credential Vault Management
+
+#### Add a Credential to the Vault
+```bash
+./bin/homelab-idp vault add \
+  --service "Proxmox Cluster" \
+  --username "root@pam" \
+  --password "ClusterRootP@ssword2026" \
+  --url "https://192.168.1.100:8006" \
+  --category "Infrastructure" \
+  --notes "Cluster master node"
+```
+
+#### List Vault Credentials
+```bash
+# List with passwords masked
+./bin/homelab-idp vault list
+
+# List with passwords decrypted
+./bin/homelab-idp vault list --reveal
+
+# Search credentials and output JSON
+./bin/homelab-idp vault list --query "proxmox" --reveal --json
+```
+
+#### Inspect / Retrieve a Credential
+```bash
+./bin/homelab-idp vault get "Proxmox Cluster" --reveal
+./bin/homelab-idp vault get "Proxmox Cluster" --reveal --json
+```
+
+#### Update a Credential
+```bash
+./bin/homelab-idp vault update "Proxmox Cluster" --password "NewPvePassword2026!"
+```
+
+#### Delete a Credential
+```bash
+./bin/homelab-idp vault delete "Proxmox Cluster"
+```
+
+---
+
+### 4. Direct Token Generation and Testing
+
+#### Generate a Session / Bearer JWT Token
+Generate a signed token for automated scripts without completing a browser login:
+```bash
+./bin/homelab-idp token generate --username admin --hours 24 --json
+```
+
+#### Test Forward Authentication with a Token
+Simulate a reverse proxy subrequest to verify token headers:
+```bash
+./bin/homelab-idp forward-auth test --token "<jwt_token>"
 ```
 
 ---
@@ -145,16 +257,17 @@ Default credentials: `admin` / `change_this_master_password`
 
 ## Setup and Service Integration Guide
 
-### 1. Registering OIDC Clients in the Dashboard
+### 1. Registering OIDC Clients
 
-Before connecting any application supporting native OIDC:
-1. Navigate to the `homelab-idp` web dashboard and log in as an administrator.
-2. Click **OIDC Clients** in the top navigation bar.
-3. Click **Register Client**.
-4. Enter the **Application Name** (e.g., `Komga`, `Nextcloud`, `Grafana`).
-5. Enter the exact **Redirect URIs** allowed by that application (one per line or comma-separated).
-6. Submit the form.
-7. **Important**: Copy the generated `client_id` and `client_secret`. The secret is displayed only once.
+You can register OIDC clients either via the Web Dashboard or via the CLI:
+
+```bash
+docker compose exec homelab-idp homelab-idp oidc register \
+  --name "Komga" \
+  --redirect-uri "https://komga.yourdomain.com/login/oauth2/code/homelab-idp"
+```
+
+Save the displayed `client_id` and `client_secret`.
 
 ---
 
@@ -374,6 +487,7 @@ music.yourdomain.com {
 ## API Reference
 
 ### Authentication
+- `POST /api/auth/register`: Programmatically registers a new SSO user account (`username`, `email`, `password`, `displayName`, `role`).
 - `POST /api/auth/login`: Authenticates with username and password, sets `homelab_session` cookie. Rate limited.
 - `POST /api/auth/logout`: Clears session cookie.
 - `GET /api/auth/me`: Returns current authenticated user profile.

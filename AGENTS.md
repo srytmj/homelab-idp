@@ -23,7 +23,7 @@ This document provides machine-actionable specifications, architectural contract
      - `Remote-User`: Username
      - `Remote-Email`: Account email address
      - `Remote-Name`: Display name
-     - `Remote-Groups`: Account role (`admin`, `user`)
+     - `Remote-Groups`: Account role (`admin`, `member`)
    - On failure: Emits HTTP 401 Unauthorized without body.
 
 3. **Encrypted Credential Vault**:
@@ -32,6 +32,11 @@ This document provides machine-actionable specifications, architectural contract
    - Storage format: `<iv_hex>:<auth_tag_hex>:<ciphertext_hex>`.
    - Each secret has an isolated 12-byte cryptographically secure random IV (`crypto.randomBytes(12)`).
    - Passwords for user logins are hashed with Argon2id (`memoryCost: 64MB`, `timeCost: 3`, `parallelism: 4`).
+
+4. **Command-Line Interface (CLI)**:
+   - Programmatic CLI tool available at `/usr/local/bin/homelab-idp` (inside container) or `./bin/homelab-idp` (host).
+   - All subcommands support `--json` (or `-j`) for strict machine readability.
+   - Zero browser interaction required for agent lifecycle operations.
 
 ---
 
@@ -44,6 +49,7 @@ All JSON endpoints accept and return `application/json`. Sessions use `homelab_s
 | `/api/health` | `GET` | Container / service readiness probe | None |
 | `/.well-known/openid-configuration` | `GET` | RFC 8414 OAuth 2.0 / OIDC Discovery | None |
 | `/.well-known/jwks.json` | `GET` | RFC 7517 Public Key Keyset | None |
+| `/api/auth/register` | `POST` | Programmatic SSO user registration | None |
 | `/api/auth/login` | `POST` | Authenticate username + password | None (Rate limited: 10/min) |
 | `/api/auth/logout` | `POST` | Invalidate cookie session | Session / Bearer |
 | `/api/auth/me` | `GET` | Inspect current user identity | Session / Bearer |
@@ -58,128 +64,134 @@ All JSON endpoints accept and return `application/json`. Sessions use `homelab_s
 
 ---
 
-### Machine Interaction Recipes for AI Agents
+### Autonomous Agent CLI Recipes (Zero-Browser Automation)
 
-#### 1. Programmatic Authentication (Obtaining a Session)
+When executing inside or alongside the container, preference should be given to the native CLI with `--json`.
 
+#### 1. Generate an Immediate Bearer Token for API Operations
+Agents do not need to issue POST requests to `/api/auth/login` to obtain an authentication token:
+```bash
+homelab-idp token generate --username admin --hours 24 --json
+```
+Output:
+```json
+{
+  "success": true,
+  "token": "<signed_bearer_token>",
+  "expires_in_hours": 24,
+  "user": {
+    "id": "uuid",
+    "username": "admin",
+    "email": "admin@homelab.local",
+    "role": "admin"
+  }
+}
+```
+
+#### 2. Register an SSO User
+```bash
+homelab-idp user add \
+  --username "agent_subsystem" \
+  --email "agent@homelab.local" \
+  --password "SecureGeneratedPass99#" \
+  --name "AI Subsystem" \
+  --role member \
+  --json
+```
+
+#### 3. Register an OIDC Client Application
+```bash
+homelab-idp oidc register \
+  --name "Nextcloud Storage" \
+  --redirect-uri "https://cloud.homelab.local/apps/user_oidc/code" \
+  --json
+```
+Output:
+```json
+{
+  "success": true,
+  "client": {
+    "id": "uuid",
+    "client_id": "nextcloud-storage-a1b2c3",
+    "client_name": "Nextcloud Storage",
+    "redirect_uris": ["https://cloud.homelab.local/apps/user_oidc/code"],
+    "scopes": ["openid", "profile", "email"],
+    "created_at": "2026-09-14T12:00:00.000Z"
+  },
+  "client_secret": "32_byte_hex_secret"
+}
+```
+
+#### 4. Save and Query Encrypted Vault Credentials
+```bash
+# Add secret
+homelab-idp vault add \
+  --service "PostgreSQL Master" \
+  --username "postgres" \
+  --password "db_pass_123" \
+  --url "postgres://10.0.0.5:5432" \
+  --category "Database" \
+  --json
+
+# Query secrets with decrypted passwords
+homelab-idp vault list --query "postgres" --reveal --json
+
+# Inspect single secret
+homelab-idp vault get "PostgreSQL Master" --reveal --json
+```
+
+#### 5. Verify Forward Authentication
+```bash
+homelab-idp forward-auth test --token "<jwt_token>" --json
+```
+Output:
+```json
+{
+  "status": 200,
+  "message": "Authorized",
+  "headers": {
+    "Remote-User": "admin",
+    "Remote-Email": "admin@suryatmaja.dev",
+    "Remote-Name": "Homelab Administrator",
+    "Remote-Groups": "admin"
+  }
+}
+```
+
+---
+
+### HTTP API Recipes for AI Agents
+
+#### 1. Programmatic User Registration
+```bash
+curl -s -X POST http://localhost:4000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "new_operator",
+    "email": "operator@homelab.local",
+    "password": "StrongPassword2026!",
+    "displayName": "Operator One",
+    "role": "member"
+  }'
+```
+
+#### 2. Programmatic Authentication (Obtaining a Session)
 ```bash
 curl -s -c cookies.txt -X POST http://localhost:4000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"change_this_master_password"}'
 ```
 
-Response format:
-```json
-{
-  "token": "<jwt_string>",
-  "user": {
-    "id": "c1f7b0e1-4c17-48f8-a15d-000000000001",
-    "username": "admin",
-    "email": "admin@homelab.internal",
-    "displayName": "Administrator",
-    "role": "admin"
-  }
-}
-```
-
-#### 2. Registering a New OIDC Client Application
-
-To dynamically attach a service (e.g., Grafana, Nextcloud) to `homelab-idp`:
-
+#### 3. Programmatic Secret Retrieval from Vault
 ```bash
-curl -s -b cookies.txt -X POST http://localhost:4000/api/oidc/clients \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_name": "Grafana Homelab",
-    "redirect_uris": [
-      "https://grafana.homelab.internal/login/generic_oauth"
-    ]
-  }'
-```
-
-Response format:
-```json
-{
-  "client": {
-    "id": "18fbd862-4303-4903-b09e-7117e3f9a76d",
-    "client_id": "grafana-homelab",
-    "client_name": "Grafana Homelab",
-    "redirect_uris": ["https://grafana.homelab.internal/login/generic_oauth"],
-    "created_at": "2026-09-14T05:00:00.000Z"
-  },
-  "client_secret": "sec_b3f9..."
-}
-```
-*Note: `client_secret` is returned only once at creation time.*
-
-#### 3. Automated Token Exchange (Authorization Code Grant)
-
-Step A: Initiate authorization:
-```bash
-curl -s -b cookies.txt -X POST http://localhost:4000/api/oauth/authorize \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "grafana-homelab",
-    "redirect_uri": "https://grafana.homelab.internal/login/generic_oauth",
-    "scope": "openid profile email",
-    "action": "allow"
-  }'
-```
-Response:
-```json
-{
-  "code": "auth_code_hex_string",
-  "redirect_url": "https://grafana.homelab.internal/login/generic_oauth?code=auth_code_hex_string"
-}
-```
-
-Step B: Exchange code for tokens:
-```bash
-curl -s -X POST http://localhost:4000/api/oauth/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code" \
-  -d "code=auth_code_hex_string" \
-  -d "redirect_uri=https://grafana.homelab.internal/login/generic_oauth" \
-  -d "client_id=grafana-homelab" \
-  -d "client_secret=sec_b3f9..."
-```
-Response:
-```json
-{
-  "access_token": "<jwt_string>",
-  "token_type": "Bearer",
-  "expires_in": 86400,
-  "id_token": "<signed_rs256_jwt_string>"
-}
-```
-
-#### 4. Programmatic Secret Retrieval from Vault
-
-```bash
-curl -s -b cookies.txt "http://localhost:4000/api/vault?q=postgres"
-```
-Response returns decrypted plaintext for authorized sessions:
-```json
-{
-  "credentials": [
-    {
-      "id": "72c1823d-d0b2-4360-a49a-82cca6f7cc76",
-      "service_name": "PostgreSQL Core",
-      "category": "Infrastructure",
-      "service_url": "postgres://localhost:5432",
-      "username": "postgres",
-      "password": "production_database_password",
-      "notes": "Main homelab cluster"
-    }
-  ]
-}
+curl -s -H "Authorization: Bearer <jwt_token>" "http://localhost:4000/api/vault?q=postgres"
 ```
 
 ---
 
 ### Error Handling Rules for Autonomous Systems
 
-1. **HTTP 401 Unauthorized**: Session expired or invalid credentials. Call `/api/auth/login` to renew session.
-2. **HTTP 429 Too Many Requests**: Rate limiting active on login attempts (limit is 10 requests per minute per IP). Exponential backoff is recommended.
-3. **HTTP 400 Invalid Redirect URI**: The `redirect_uri` supplied in `/api/oauth/authorize` must match one of the exact strings stored in `oidc_clients.redirect_uris`.
-4. **Database Mode**: If PostgreSQL is unreachable at boot, the server logs a warning and engages an in-memory fallback adapter (`memoryFallback.ts`). All routes and cryptographic behaviors remain 100% operational in ephemeral mode.
+1. **HTTP 401 Unauthorized**: Session expired or invalid credentials. Call `/api/auth/login` or `homelab-idp token generate` to renew session.
+2. **HTTP 409 Conflict**: Returned by `POST /api/auth/register` when the requested `username` or `email` already exists.
+3. **HTTP 429 Too Many Requests**: Rate limiting active on login and register endpoints (10 requests per minute per IP). Apply exponential backoff.
+4. **Database Mode**: If PostgreSQL is unreachable at boot, the server logs a warning and engages an in-memory fallback adapter (`memoryFallback.ts`). All routes and cryptographic behaviors remain operational in ephemeral mode.

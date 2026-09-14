@@ -60,8 +60,8 @@ async function runTests() {
     role: 'admin',
   });
   const verifiedSession = await verifySessionToken(sessionToken);
-  assert(verifiedSession !== null, 'Session token should be valid');
-  assert.strictEqual(verifiedSession?.username, 'admin');
+  assert(verifiedSession, 'Session token should verify successfully');
+  assert.strictEqual(verifiedSession.username, 'admin');
 
   // OIDC ID Token
   const idToken = await signOidcIdToken({
@@ -70,17 +70,19 @@ async function runTests() {
     email: 'admin@homelab.local',
     aud: 'komga-oidc',
   });
-  assert(typeof idToken === 'string' && idToken.split('.').length === 3, 'ID token should be valid JWT');
+  assert(typeof idToken === 'string', 'ID token should be a string');
+  assert.strictEqual(idToken.split('.').length, 3, 'JWT should have 3 parts');
   console.log('  ✅ JWKS & Tokens passed.');
 
-  // 4. Initialize Database & Seed
+  // 4. Test DB Initializer
   console.log('▶ Initializing Database and running migrations & seeds...');
   await initDb();
-  const users = await query('SELECT * FROM users');
-  assert(users.rows.length >= 1, 'Initial admin user should be seeded');
-  console.log(`  ✅ Database initialized. Found ${users.rows.length} users.`);
+  const userCountRes = await query('SELECT COUNT(*) FROM users');
+  const userCount = parseInt(userCountRes.rows[0].count, 10);
+  assert(userCount >= 1, 'Initial admin user must exist');
+  console.log(`  ✅ Database initialized. Found ${userCount} users.`);
 
-  // 5. Test Fastify Application Routes
+  // 5. Test Fastify API Endpoints
   console.log('▶ Testing Fastify API Endpoints...');
   const app = await buildApp();
 
@@ -90,6 +92,37 @@ async function runTests() {
     url: '/api/health',
   });
   assert.strictEqual(healthRes.statusCode, 200);
+
+  // User Registration endpoint test (POST /api/auth/register)
+  console.log('▶ Testing SSO User Registration (POST /api/auth/register)...');
+  const regRes = await app.inject({
+    method: 'POST',
+    url: '/api/auth/register',
+    payload: {
+      username: 'testuser_sso',
+      email: 'testuser@homelab.local',
+      password: 'StrongPassword123!',
+      displayName: 'Test SSO User',
+    },
+  });
+  assert.strictEqual(regRes.statusCode, 201, 'Registration should return 201 Created');
+  const regBody = JSON.parse(regRes.body);
+  assert.strictEqual(regBody.user.username, 'testuser_sso');
+  assert.strictEqual(regBody.user.email, 'testuser@homelab.local');
+  assert(regBody.token, 'Registration should return auth token');
+
+  // Duplicate registration conflict test
+  const dupRes = await app.inject({
+    method: 'POST',
+    url: '/api/auth/register',
+    payload: {
+      username: 'testuser_sso',
+      email: 'another@homelab.local',
+      password: 'StrongPassword123!',
+    },
+  });
+  assert.strictEqual(dupRes.statusCode, 409, 'Duplicate username should return 409 Conflict');
+  console.log('  ✅ SSO User Registration passed.');
 
   // Login with invalid credentials
   const badLoginRes = await app.inject({

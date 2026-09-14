@@ -35,10 +35,22 @@ export async function query(sql: string, params: any[] = []): Promise<{ rows: an
 }
 
 /**
+ * Close database pool connection.
+ */
+export async function closeDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+}
+
+/**
  * Initialize database connection, run DDL migrations, and seed initial admin user.
  */
-export async function initDb(): Promise<void> {
-  console.log(`[Database] Connecting to database: ${config.databaseUrl.replace(/:[^:@]+@/, ':****@')}...`);
+export async function initDb(quiet = false): Promise<void> {
+  if (!quiet) {
+    console.log(`[Database] Connecting to database: ${config.databaseUrl.replace(/:[^:@]+@/, ':****@')}...`);
+  }
 
   try {
     const testPool = new Pool({
@@ -52,18 +64,22 @@ export async function initDb(): Promise<void> {
     client.release();
     pool = testPool;
     isUsingMemoryDb = false;
-    console.log('[Database] Successfully connected to PostgreSQL.');
+    if (!quiet) {
+      console.log('[Database] Successfully connected to PostgreSQL.');
+    }
   } catch (err: any) {
-    console.warn(`[Database] PostgreSQL connection failed (${err.message}).`);
-    console.warn('[Database] Falling back to high-fidelity In-Memory Database store for dev/testing.');
+    if (!quiet) {
+      console.warn(`[Database] PostgreSQL connection failed (${err.message}).`);
+      console.warn('[Database] Falling back to high-fidelity In-Memory Database store for dev/testing.');
+    }
     isUsingMemoryDb = true;
   }
 
   // Run migrations / table creation
-  await runMigrations();
+  await runMigrations(quiet);
 
   // Seed initial admin user if empty
-  await seedInitialAdmin();
+  await seedInitialAdmin(quiet);
 
   // Seed default OIDC clients (e.g. Komga, Nextcloud) for convenience
   await seedDefaultClients();
@@ -72,75 +88,38 @@ export async function initDb(): Promise<void> {
   await seedDefaultVault();
 }
 
-async function runMigrations(): Promise<void> {
+async function runMigrations(quiet = false): Promise<void> {
   const ddl = `
     CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
     CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-    CREATE TABLE IF NOT EXISTS users (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      username VARCHAR(64) UNIQUE NOT NULL,
-      email VARCHAR(128) UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      display_name VARCHAR(128),
-      avatar_url TEXT,
-      role VARCHAR(20) DEFAULT 'admin',
-      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
+    CREATE TABLE IF NOT EXISTS users (\n      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n      username VARCHAR(64) UNIQUE NOT NULL,\n      email VARCHAR(128) UNIQUE NOT NULL,\n      password_hash TEXT NOT NULL,\n      display_name VARCHAR(128),\n      avatar_url TEXT,\n      role VARCHAR(20) DEFAULT 'admin',\n      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),\n      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n    );
 
-    CREATE TABLE IF NOT EXISTS oidc_clients (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      client_id VARCHAR(64) UNIQUE NOT NULL,
-      client_secret_hash TEXT NOT NULL,
-      client_name VARCHAR(128) NOT NULL,
-      redirect_uris TEXT[] NOT NULL,
-      scopes TEXT[] DEFAULT ARRAY['openid', 'profile', 'email'],
-      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
+    CREATE TABLE IF NOT EXISTS oidc_clients (\n      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n      client_id VARCHAR(64) UNIQUE NOT NULL,\n      client_secret_hash TEXT NOT NULL,\n      client_name VARCHAR(128) NOT NULL,\n      redirect_uris TEXT[] NOT NULL,\n      scopes TEXT[] DEFAULT ARRAY['openid', 'profile', 'email'],\n      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n    );
 
-    CREATE TABLE IF NOT EXISTS oidc_auth_codes (
-      code VARCHAR(128) PRIMARY KEY,
-      client_id VARCHAR(64) REFERENCES oidc_clients(client_id) ON DELETE CASCADE,
-      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-      redirect_uri TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-      used BOOLEAN DEFAULT FALSE
-    );
+    CREATE TABLE IF NOT EXISTS oidc_auth_codes (\n      code VARCHAR(128) PRIMARY KEY,\n      client_id VARCHAR(64) REFERENCES oidc_clients(client_id) ON DELETE CASCADE,\n      user_id UUID REFERENCES users(id) ON DELETE CASCADE,\n      redirect_uri TEXT NOT NULL,\n      scope TEXT NOT NULL,\n      expires_at TIMESTAMP WITH TIME ZONE NOT NULL,\n      used BOOLEAN DEFAULT FALSE\n    );
 
-    CREATE TABLE IF NOT EXISTS vault_credentials (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      service_name VARCHAR(128) NOT NULL,
-      category VARCHAR(64) DEFAULT 'General',
-      service_url TEXT,
-      username VARCHAR(128) NOT NULL,
-      encrypted_password TEXT NOT NULL,
-      encrypted_notes TEXT,
-      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
+    CREATE TABLE IF NOT EXISTS vault_credentials (\n      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n      service_name VARCHAR(128) NOT NULL,\n      category VARCHAR(64) DEFAULT 'General',\n      service_url TEXT,\n      username VARCHAR(128) NOT NULL,\n      encrypted_password TEXT NOT NULL,\n      encrypted_notes TEXT,\n      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),\n      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n    );
   `;
 
   if (!isUsingMemoryDb && pool) {
     await pool.query(ddl);
-    console.log('[Database] PostgreSQL schema migrations completed.');
+    if (!quiet) console.log('[Database] PostgreSQL schema migrations completed.');
   } else {
     memoryDb.query(ddl);
-    console.log('[Database] In-memory database schema initialized.');
+    if (!quiet) console.log('[Database] In-memory database schema initialized.');
   }
 }
 
-async function seedInitialAdmin(): Promise<void> {
+async function seedInitialAdmin(quiet = false): Promise<void> {
   const countRes = await query('SELECT COUNT(*) FROM users');
   const count = parseInt(countRes.rows[0]?.count || '0', 10);
 
   if (count === 0) {
-    console.log(`[Database] Seeding initial admin account '${config.initialAdmin.username}'...`);
+    if (!quiet) console.log(`[Database] Seeding initial admin account '${config.initialAdmin.username}'...`);
     const passwordHash = await hashPassword(config.initialAdmin.password);
     await query(
-      `INSERT INTO users (username, email, password_hash, display_name, role)
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO users (username, email, password_hash, display_name, role)\n       VALUES ($1, $2, $3, $4, $5)`,
       [
         config.initialAdmin.username,
         config.initialAdmin.email,
@@ -149,7 +128,7 @@ async function seedInitialAdmin(): Promise<void> {
         'admin',
       ]
     );
-    console.log('[Database] Initial admin user seeded successfully.');
+    if (!quiet) console.log('[Database] Initial admin user seeded successfully.');
   }
 }
 
@@ -158,8 +137,7 @@ async function seedDefaultClients(): Promise<void> {
   if (check.rows.length === 0) {
     const secretHash = await hashPassword('komga_homelab_secret_2026');
     await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)\n       VALUES ($1, $2, $3, $4, $5)`,
       [
         'komga-oidc',
         secretHash,
@@ -174,8 +152,7 @@ async function seedDefaultClients(): Promise<void> {
   if (checkNextcloud.rows.length === 0) {
     const secretHash = await hashPassword('nextcloud_homelab_secret_2026');
     await query(
-      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, scopes)\n       VALUES ($1, $2, $3, $4, $5)`,
       [
         'nextcloud-oidc',
         secretHash,
@@ -229,8 +206,7 @@ async function seedDefaultVault(): Promise<void> {
       const encPass = encryptAesGcm(item.password, config.vaultSecretKey);
       const encNotes = encryptAesGcm(item.notes, config.vaultSecretKey);
       await query(
-        `INSERT INTO vault_credentials (service_name, category, service_url, username, encrypted_password, encrypted_notes)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO vault_credentials (service_name, category, service_url, username, encrypted_password, encrypted_notes)\n         VALUES ($1, $2, $3, $4, $5, $6)`,
         [item.service_name, item.category, item.service_url, item.username, encPass, encNotes]
       );
     }

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -e
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -f "$DIR/backend/dist/cli.js" ]; then
+  exec node "$DIR/backend/dist/cli.js" "$@"
+else
+  exec npx --prefix "$DIR/backend" tsx "$DIR/backend/src/cli.ts" "$@"
+fi

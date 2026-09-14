@@ -36,7 +36,9 @@ COPY backend/package*.json ./
 RUN npm ci --omit=dev
 
 COPY --from=backend-builder /app/backend/dist ./dist
-COPY --from=backend-builder /app/backend/src/db/schema.sql ./dist/db/schema.sql
+
+# Symlink CLI binary to system path for direct docker exec execution
+RUN chmod +x /app/dist/cli.js && ln -s /app/dist/cli.js /usr/local/bin/homelab-idp
 
 # Copy frontend static build for Fastify static serving
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

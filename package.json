@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Homelab Identity Provider & Credential Vault",
+  "bin": {
+    "homelab-idp": "./backend/dist/cli.js"
+  },
   "scripts": {
     "build:frontend": "cd frontend && npm run build",
     "build:backend": "cd backend && npm run build",
@@ -10,7 +13,8 @@
     "start": "cd backend && npm start",
     "dev:backend": "cd backend && npm run dev",
     "dev:frontend": "cd frontend && npm run dev",
-    "test": "cd backend && npm test"
+    "test": "cd backend && npm test",
+    "cli": "npm --prefix backend run cli --"
   },
   "devDependencies": {
     "puppeteer-core": "^25.10.0"
