@@ -1,0 +1,31 @@
+import { buildApp } from './app.js';
+import { config } from './config/env.js';
+import { initDb } from './db/index.js';
+import { getOidcKeyPair } from './crypto/jwks.js';
+
+async function main() {
+  try {
+    console.log('🚀 Starting homelab-idp backend...');
+
+    // Pre-initialize RSA key pair for JWKS
+    await getOidcKeyPair();
+
+    // Initialize database pool, migrations, and seed initial admin
+    await initDb();
+
+    // Build Fastify application
+    const app = await buildApp();
+
+    await app.listen({ port: config.port, host: '0.0.0.0' });
+
+    console.log(`✨ homelab-idp running at http://0.0.0.0:${config.port}`);
+    console.log(`   OIDC Discovery: http://localhost:${config.port}/.well-known/openid-configuration`);
+    console.log(`   Forward Auth:   http://localhost:${config.port}/api/auth/verify`);
+    console.log(`   Vault API:      http://localhost:${config.port}/api/vault`);
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+}
+
+main();

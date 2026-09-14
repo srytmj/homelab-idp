@@ -1,0 +1,15 @@
+{
+  "name": "homelab-idp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Homelab Identity Provider & Credential Vault",
+  "scripts": {
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "build": "npm run build:frontend && npm run build:backend",
+    "start": "cd backend && npm start",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "test": "cd backend && npm test"
+  }
+}

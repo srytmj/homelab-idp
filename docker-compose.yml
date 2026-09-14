@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  homelab-idp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: homelab-idp
+    restart: unless-stopped
+    ports:
+      - "8300:4000" # Host port 8300 -> Container port 4000
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+      - APP_URL=${APP_URL:-http://localhost:8300}
+      - DATABASE_URL=postgres://admin:${POSTGRES_PASSWORD}@postgres:5432/homelab_idp?sslmode=disable
+      - VAULT_SECRET_KEY=${VAULT_SECRET_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - INITIAL_ADMIN_USERNAME=${INITIAL_ADMIN_USERNAME:-admin}
+      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD}
+      - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-admin@suryatmaja.dev}
+    networks:
+      - homelab-net
+
+networks:
+  homelab-net:
+    external: true
