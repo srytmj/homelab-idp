@@ -25,11 +25,13 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess, returnUrl }) => {
       setIsLoading(true);
       setError('');
       const res = await api.login(username, password);
-      onLoginSuccess(res.user);
-
+      
       if (returnUrl) {
         window.location.href = returnUrl;
+        return;
       }
+      
+      onLoginSuccess(res.user);
     } catch (err: any) {
       setError(err.message || 'Invalid credentials');
     } finally {

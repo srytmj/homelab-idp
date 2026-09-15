@@ -93,6 +93,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
       // Set secure session cookie
       reply.setCookie('homelab_session', token, {
+      domain: config.cookieDomain,
         path: '/',
         httpOnly: true,
         secure: config.nodeEnv === 'production',
@@ -171,6 +172,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
       // Set secure session cookie
       reply.setCookie('homelab_session', token, {
+      domain: config.cookieDomain,
         path: '/',
         httpOnly: true,
         secure: config.nodeEnv === 'production',
@@ -188,7 +190,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
   // POST /api/auth/logout
   fastify.post('/logout', async (request: FastifyRequest, reply: FastifyReply) => {
-    reply.clearCookie('homelab_session', { path: '/' });
+    reply.clearCookie('homelab_session', { path: '/', domain: config.cookieDomain });
     return reply.send({
       success: true,
       message: 'Logged out successfully',
@@ -324,6 +326,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     // Refresh cookie
     reply.setCookie('homelab_session', token, {
+      domain: config.cookieDomain,
       path: '/',
       httpOnly: true,
       secure: config.nodeEnv === 'production',
